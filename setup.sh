@@ -21,6 +21,16 @@ git clone https://github.com/MIT-SPARK/VGGT_SPARK.git vggt
 pip install -e ./vggt
 cd ..
 
+# 3b. Install Depth Anything 3 (optional alternate backend, --model_backend da3).
+# `pycolmap` has no aarch64 wheel; depth_anything_3's export module imports it
+# eagerly even though this pipeline never uses COLMAP export, so a stub stands
+# in for it. moviepy is pinned to 1.0.3 because depth_anything_3 imports the
+# `moviepy.editor` compat shim, which moviepy>=2 removed.
+echo "Installing Depth Anything 3..."
+pip install -e ./stubs/pycolmap_stub
+pip install --no-deps depth-anything-3==0.1.1
+pip install "moviepy==1.0.3" evo e3nn typer fastapi uvicorn addict
+
 # 4. Install Perception Encoder
 echo "Cloning and installing Perception Encoder..."
 cd third_party

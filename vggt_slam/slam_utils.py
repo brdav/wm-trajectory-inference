@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import numpy as np
@@ -6,7 +7,104 @@ import scipy
 import time
 from PIL import Image
 from torchvision import transforms as TF
+from scipy.spatial.transform import Rotation
 import torch
+
+
+def _poses_and_quats(rotations, translations):
+    translations = np.asarray(translations)
+    quaternions = Rotation.from_matrix(rotations).as_quat()  # x, y, z, w
+    poses = np.tile(np.eye(4), (len(translations), 1, 1))
+    poses[:, :3, :3] = rotations
+    poses[:, :3, 3] = translations
+    return poses, quaternions
+
+
+def _atomic_savez(path, **fields):
+    """np.savez to a temp file in the same directory, then os.replace() into path -- so a
+    process killed mid-write (this session hit real SIGKILLs from cluster instability) never
+    leaves a truncated/corrupt result file behind, and two workers racing to populate the same
+    shared cache path (see vggt_slam/undistort.py's session-level cache) can't produce a torn
+    read either. Redundant recomputation in that race is harmless since the output is
+    deterministic; this only prevents a corrupted partial read."""
+    path = str(path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    with open(tmp_path, "wb") as f:
+        np.savez(f, **fields)
+    os.replace(tmp_path, path)
+
+
+def save_result_npz(path, frame_ids, slam_rotations, slam_translations, extraction_fps, video,
+                     fused_rotations=None, fused_translations=None, matched_line=None,
+                     snapped=None, gps_fusion_info=None):
+    """Writes one consolidated per-clip result file: the raw SLAM trajectory plus (once
+    available) the GPS-fused trajectory, matched route, and per-point snap -- replaces the old
+    poses.npz + poses_gps_fused.npz + poses_gps_route.wkt + poses_gps_snapped.npy, whose file
+    count (plus a since-removed per-clip osm_network/ scratch subtree) was adding up to ~1-2M
+    inodes across the ~120k-clip dataset and visibly straining the shared filesystem.
+
+    Always writes frame_ids/slam_poses/slam_quaternions/extraction_fps/video. The
+    fused_*/matched_line/snapped/gps_fusion_info arguments are optional and simply omitted from
+    the file when None -- callers write this file TWICE per clip: once right after SLAM with
+    only the always-present fields (so the SLAM result survives even if GPS fusion later crashes
+    the whole process), and again after GPS fusion finishes (success or failure) with the
+    slam_* arguments unchanged and whichever fusion fields are now available. See
+    load_result_npz for the read side and exact optional-field semantics.
+
+    gps_fusion_info: the same dict already returned to callers and written to manifest.jsonl
+    (status, region_used, network_profile_used, matched_keyframes, total_keyframes,
+    map_match_error_mean_m/max_m/n_points, error) -- stored as JSON so the file is
+    self-describing without cross-referencing a manifest.
+    """
+    frame_ids = np.asarray(frame_ids, dtype=float)
+    slam_poses, slam_quaternions = _poses_and_quats(slam_rotations, slam_translations)
+
+    fields = dict(
+        frame_ids=frame_ids, slam_poses=slam_poses, slam_quaternions=slam_quaternions,
+        extraction_fps=np.asarray(extraction_fps, dtype=float), video=np.asarray(str(video)),
+    )
+    if fused_rotations is not None:
+        fused_poses, fused_quaternions = _poses_and_quats(fused_rotations, fused_translations)
+        fields["fused_poses"] = fused_poses
+        fields["fused_quaternions"] = fused_quaternions
+    if matched_line is not None:
+        fields["matched_route_wkt"] = np.asarray(matched_line.wkt)
+    if snapped is not None:
+        fields["snapped"] = np.asarray(snapped)
+    if gps_fusion_info is not None:
+        fields["gps_fusion_json"] = np.asarray(json.dumps(gps_fusion_info))
+
+    _atomic_savez(path, **fields)
+
+
+def load_result_npz(path):
+    """Reads a consolidated result.npz (see save_result_npz). Always-present keys:
+    frame_ids/slam_rotations/slam_translations/extraction_fps/video. The GPS-fusion keys
+    (fused_rotations/fused_translations/snapped/matched_route_wkt/gps_fusion_info) are None
+    when that clip's fusion wasn't attempted or didn't reach that stage -- mirrors the exact
+    three-tier semantics the old separate-files layout expressed via file existence (SLAM-only /
+    SLAM+placement-no-route / full success), just via dict values instead of sibling files."""
+    data = np.load(path)
+    out = {
+        "frame_ids": data["frame_ids"],
+        "slam_rotations": data["slam_poses"][:, :3, :3],
+        "slam_translations": data["slam_poses"][:, :3, 3],
+        "extraction_fps": float(data["extraction_fps"]),
+        "video": str(data["video"]),
+        "fused_rotations": None, "fused_translations": None,
+        "snapped": None, "matched_route_wkt": None, "gps_fusion_info": None,
+    }
+    if "fused_poses" in data:
+        out["fused_rotations"] = data["fused_poses"][:, :3, :3]
+        out["fused_translations"] = data["fused_poses"][:, :3, 3]
+    if "snapped" in data:
+        out["snapped"] = data["snapped"]
+    if "matched_route_wkt" in data:
+        out["matched_route_wkt"] = str(data["matched_route_wkt"])
+    if "gps_fusion_json" in data:
+        out["gps_fusion_info"] = json.loads(str(data["gps_fusion_json"]))
+    return out
 
 
 def slice_with_overlap(lst, n, k):

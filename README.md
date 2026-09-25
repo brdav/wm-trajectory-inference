@@ -1,189 +1,80 @@
-<div align="center">
-  <h1>VGGT-SLAM 2.0</h1>
+# Trajectory inference for WM
 
-  <p>
-    <strong>VGGT-SLAM</strong> 
-    <a href="https://arxiv.org/abs/2505.12549">
-      <img src="https://img.shields.io/badge/arXiv-b33737?logo=arXiv" alt="arXiv" style="vertical-align:middle">
-    </a>
-    &nbsp;&nbsp;&nbsp;&nbsp;
-    <strong>VGGT-SLAM 2.0</strong> 
-    <a href="https://arxiv.org/abs/2601.19887">
-      <img src="https://img.shields.io/badge/arXiv-b33737?logo=arXiv" alt="arXiv" style="vertical-align:middle">
-    </a>
-  </p>
+## Quick start
 
-  <br />
+A pre-built image is ready to use on Clariden — no build step needed. Register it as the
+Pyxis environment `vggtslam_env` (image itself at
+`/capstor/store/cscs/swissai/ab036/containers/vggtslam_image.sqsh`), so every command below just
+runs as `srun --environment=vggtslam_env <command>`.
 
-  <img src="assets/vggt_slam_demo.gif" alt="VGGT-SLAM" width="95%"/>
+Below are the commands used to process Natix:
 
-  <p><strong><em>VGGT-SLAM 2.0: Real-time Dense Feed-forward Scene Reconstruction</em></strong></p>
+| Task | Command |
+|---|---|
+| Full dataset, self-resubmitting until done | `sbatch scripts/run_full_dataset.sbatch` |
+| Download OSM road-network extracts (should be done first once, before GPS fusion) | `python scripts/download_osm_extracts.py --out_dir <dir>` |
+| Archive / restore finished sessions (inode cleanup) | `python scripts/pack_sessions.py ...` / `scripts/unpack_sessions.py ...` |
 
-  <p>
-    <a href="https://dominic101.github.io/DominicMaggio/"><strong>Dominic Maggio</strong></a> &nbsp;·&nbsp;
-    <a href="https://lucacarlone.mit.edu/"><strong>Luca Carlone</strong></a>
-  </p>
-</div>
+Every script's own `--help` / module docstring has the full flag list. The full run produces one
+`result.npz` per clip — see [Loading a clip's trajectory](#loading-a-clips-trajectory) below.
 
----
+**Other datasets (no intrinsics metadata, no GPS):** intrinsics and GPS already degrade
+gracefully — with no sibling `FIXED_METADATA.json`, `batch_infer.py` automatically falls back to
+`--shared_intrinsics`; with no sibling GPS `.csv` (or `--no-gps_fusion`), GPS fusion is just
+skipped. The one real Natix-specific piece is clip *discovery*: `--dataset_root` batch mode only
+finds videos inside directories literally named `FRONT_FOLDER`. For another layout,
+generalize `_iter_front_folder_mp4s` in `scripts/batch_infer.py`.
 
-# This repo contains the code for VGGT-SLAM 2.0 (located here) and VGGT-SLAM (located on the version1.0 branch of this repo).
+## Rebuild image (Podman + Enroot)
 
-## 📚 Table of Contents
-* [💻 Installation](#installation-of-vGGT-sLAM)
-* [🚀 Quick Start](#quick-start)
-* [📊 Running Evaluations](#running-evaluations)
-* [⚡ Running Online](#Running-Online)
-* [📄 News and Updates](#News-and-Updates)
-* [📄 Paper Citation](#citation)
+A `Dockerfile` is provided for GPU clusters using Slurm with Pyxis/enroot, for when you need to
+change dependencies (edits to `vggt_slam/*.py`/`main.py` alone don't need a rebuild, just a `pip install -e .`).
 
----
-
-## Installation of VGGT-SLAM
-
-Clone VGGT-SLAM:
-
+Build the image once and convert it to a squashfs file for enroot:
 ```
-git clone https://github.com/MIT-SPARK/VGGT-SLAM
+podman build -t vggtslam_image .
+enroot import -o vggtslam_image.sqsh podman://vggtslam_image
 ```
+(To make this the new pre-built image everyone else uses, copy the resulting `.sqsh` over
+`/capstor/store/cscs/swissai/ab036/containers/vggtslam_image.sqsh` -- that path is what
+`vggtslam_env`'s Pyxis definition, `~/.edf/vggtslam_env.toml`, points at.)
 
-```
-cd VGGT-SLAM
-```
 
-### Create and activate a new conda environment
+## Loading a clip's trajectory
 
-```
-conda create -n vggt-slam python=3.11
+Use `vggt_slam.slam_utils.load_result_npz` rather than parsing `result.npz` by hand — it returns a plain dict (`frame_ids`, `slam_rotations`, `slam_translations`, `extraction_fps`, `video`, and `fused_rotations`/`fused_translations`/`snapped`/`matched_route_wkt`/`gps_fusion_info`, the last five `None` if that clip's GPS fusion never ran or didn't reach that stage):
+
+```python
+from vggt_slam.slam_utils import load_result_npz
+
+result = load_result_npz("/path/to/out_dir/result.npz")
+print(result["slam_translations"].shape)   # (n_frames, 3)
+print(result["gps_fusion_info"])           # None, or {"status": ..., "map_match_error_mean_m": ..., ...}
 ```
 
-```
-conda activate vggt-slam
-```
+At batch-pipeline scale (`scripts/batch_infer.py --dataset_root ...`), a whole finished recording session's directory (every clip that shares one `FIXED_METADATA.json`/undistort cache) may have since been archived into a single `Session.zip` by `scripts/pack_sessions.py`, to keep the output tree's inode count down — see that script's docstring. A packed clip's own directory no longer exists on disk, so reach it through the zip instead of assuming the loose path is always there:
 
-### Make the setup script executable and run it
-This step will automatically download all 3rd party packages including Perception Encoder, SAM 3, and our fork of VGGT. More details on the license for Perception Encoder 
-can be found [here](https://github.com/facebookresearch/perception_models/blob/main/LICENSE.PE), for SAM3 can be found [here](https://github.com/facebookresearch/sam3/blob/main/LICENSE), and for VGGT can be found [here](https://github.com/facebookresearch/vggt/blob/main/LICENSE.txt). Note that we only use SAM 3 and Perception Encoder for optional open-set 3D object detection.
+```python
+import io
+import zipfile
+from pathlib import Path
 
-```
-chmod +x setup.sh
-./setup.sh
-```
+from vggt_slam.slam_utils import load_result_npz
+from vggt_slam.undistort import session_cache_dir
+from vggt_slam.session_pack import session_zip_path
 
----
 
-## Quick Start
-
-run `python main.py --image_folder /path/to/image/folder --max_loops 1 --vis_map` replacing the image path with your folder of images. 
-This will create a visualization in viser which shows the incremental construction of the map.
-
-As an example, we provide a folder of test images in `office_loop.zip` which will generate the following map. Using the default parameters will
-result in a single loop closure towards the end of the trajectory. Unzip the folder and set its path as the arguments for `--image_folder`, e.g.,
-
-```
-unzip office_loop.zip
+def load_clip_trajectory(out_dir):
+    """out_dir: a clip's own output directory (mirrors its path under --dataset_root, with the
+    .mp4 suffix dropped). Works whether or not the clip's session has since been packed."""
+    out_dir = Path(out_dir)
+    result_path = out_dir / "result.npz"
+    if result_path.exists():
+        return load_result_npz(result_path)
+    session_dir = session_cache_dir(out_dir)
+    arcname = str(out_dir.relative_to(session_dir) / "result.npz")
+    with zipfile.ZipFile(session_zip_path(out_dir)) as zf:
+        return load_result_npz(io.BytesIO(zf.read(arcname)))
 ```
 
-and then run the below command:
-
-```
-python3 main.py --image_folder office_loop --max_loops 1 --vis_map
-```
-
-Use the `--run_os` flag to enable 3D open-set object detection. This will prompt the user for text queries and plot a 3D bounding box of the detection on the map in viser. The office loop scene does not have very many interesting objects, but some example queries that can be used are "coffee machine", "sink", "printer", "cone", and "refrigerator." For some example scenes with more interesting objects, check out the Clio apartment and cubicle scene which can be downloaded 
-from [here](https://www.dropbox.com/scl/fo/5bkv8rsa2xvwmvom6bmza/AOc8VW71kuZCgQjcw_REbWA?rlkey=wx1njghufcxconm1znidc1hgw&e=1&st=c809h8h3&dl=0).
-
-<p align="center">
-  <img src="assets/office_loop_figure.png" width="300">
-</p>
-
-
-### Collecting Custom Data
-
-To quickly collect a test on a custom dataset, you can record a trajectory with a cell phone and convert the MOV file to a folder of images with:
-
-```
-mkdir <desired_location>/img_folder
-```
-
-And then, run the command below:
-
-```
-ffmpeg -i /path/to/video.MOV -vf "fps=10" <desired_location>/img_folder/frame_%04d.jpg
-```
-Note while vertical cell phone videos can work, to avoid images being cropped it is recommended to use horizontal videos. 
-
-### Adjusting Parameters
-
-See main.py or run `--help` from main.py to view all parameters. 
-
-For visualizing larger datasets, displaying all 3D points in Viser can either slow or crash 
-the visualizer. One way to mitigate this is to sparsify the point cloud that is sent to Viser which can be done with `--vis_voxel_size 0.005`. Increasing the number will decrease the number of displayed points. Note that this does not affect the number of points stored or used internally in VGGT-SLAM. 
-Also, by default, camera images are not shown in Viser (only frustums). The images can be added with `--vis_imgs`, but this will slow down the visualizer.
-
----
-
-## Running Evaluations
-
-To automatically run evaluation on TUM and 7-Scenes datasets, first install the datasets using the provided download instructions from [MASt3R-SLAM](https://github.com/rmurai0610/MASt3R-SLAM?tab=readme-ov-file#examples). Set the download location of MASt3R-SLAM by setting *abs_dir* in the bash scripts 
-*/evals/eval_tum.sh* and */evals/eval_7scenes.sh*
-
-#### In Tum Dataset
-
-To run on TUM, run `./evals/eval_tum.sh <w>` and then run `python evals/process_logs_tum.py --submap_size <w>` to analyze and print the results, where w is 
-the submap size, for example:
-
-```
-./evals/eval_tum.sh 32
-```
-
-```
-python evals/process_logs_tum.py --submap_size 32
-```
-
-To visualize the maps as they being constructed, inside the bash scripts add `--vis_map`. This will update the viser map each time the submap is updated. 
-
-## Running Online
-To run online, plug in a RealSense camera and run `python main_realtime.py --vis_map`. Support for open-set object detection can be enabled with `--run_os` and objects can be queried in Viser. Note that it may be desirable to reduce submap size when running the realtime code 
-just to have more frequent map updates. For example, by adding `--submap_size 8`. 
-
-## News and Updates
-* May 2025: VGGT-SLAM 1.0 is released
-* August 2025: SL(4) optimization is integrated into the official GTSAM repo
-* September 2025: VGGT-SLAM 1.0 Accepted to Neurips 2025
-* November 2025: VGGT-SLAM 1.0 Featured in MIT News [article](https://news.mit.edu/2025/teaching-robots-to-map-large-environments-1105)
-* January 2026: VGGT-SLAM 2.0 is released
-* May 2026: VGGT-SLAM 2.0 Accepted to RSS 2026
-* May 2026: FOUND-IT is released [link](https://arxiv.org/abs/2605.25371) which builds a 3D scene graph on top of VGGT-SLAM 2.0
-* June 2026: Real-time code added along with upgraded features to the visualizer
-
-
-## Acknowledgement
-
-This work was supported in part by the NSF Graduate Research Fellowship
-Program under Grant 2141064, the ARL DCIST program, and the ONR
-RAPID program.
-
-## Citation
-
-If our code is helpful, please cite our papers as follows:
-
-```
-@article{maggio2025vggt-slam,
-  title={{VGGT-SLAM}: Dense RGB SLAM Optimized on the SL (4) Manifold},
-  author={Maggio, Dominic and Lim, Hyungtae and Carlone, Luca},
-  journal={Advances in Neural Information Processing Systems},
-  volume={39},
-  year={2025}
-}
-```
-
-```
-@article{maggio2025vggt-slam2,
-  title={{VGGT-SLAM 2.0}: Real-time Dense Feed-forward Scene Reconstruction},
-  author={Maggio, Dominic and Carlone, Luca},
-  journal={Robotics: Science and Systems},
-  year={2026}
-}
-```
-
+**Gotcha when analyzing `result.npz`:** the frame shared between two adjacent submaps (the last pose of one, the first pose of the next) is logged **twice** under the same `frame_id`, one entry per submap. Any script computing per-step velocity/acceleration from consecutive rows must drop one of the duplicate pair first — otherwise the ~0 elapsed time between them divides into a spurious, enormous velocity/acceleration spike at every single submap boundary.

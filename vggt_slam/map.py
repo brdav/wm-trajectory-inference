@@ -1,9 +1,6 @@
-import os
 import numpy as np
 import torch
 import open3d as o3d
-from scipy.spatial.transform import Rotation as R
-import matplotlib.pyplot as plt
 from vggt_slam.slam_utils import decompose_camera, cosine_similarity
 
 class GraphMap:
@@ -16,9 +13,15 @@ class GraphMap:
         return len(self.submaps)
 
     def add_submap(self, submap):
+        # Idempotent by submap id: main.py's two-phase --shared_intrinsics path registers each
+        # submap here as soon as it's created (phase 1, so retrieval-based loop-closure search
+        # has something to match against for subsequent submaps), then add_points registers the
+        # SAME submap again once its pose-graph data is actually attached (phase 3) -- without
+        # this guard the second call would append a duplicate id to non_lc_submap_ids.
         submap_id = submap.get_id()
+        already_present = submap_id in self.submaps
         self.submaps[submap_id] = submap
-        if not submap.get_lc_status():
+        if not submap.get_lc_status() and not already_present:
             self.non_lc_submap_ids.append(submap_id)
     
     def get_largest_key(self, ignore_loop_closure_submaps=False):
@@ -122,44 +125,40 @@ class GraphMap:
                 homographies.append(graph.get_homography(id))
         return np.stack(homographies)
 
-    def get_all_cam_matricies(self, graph, give_camera_mat):
+    def get_all_cam_matricies(self, graph):
         cam_mats = []
         for submap in self.ordered_submaps_by_key():
             if submap.get_lc_status():
                 continue
-            poses = submap.get_all_poses_world(graph, give_camera_mat=give_camera_mat)
+            poses = submap.get_all_poses_world(graph, give_camera_mat=True)
             cam_mats.append(poses)
         return np.vstack(cam_mats)
 
-    def write_poses_to_file(self, file_name, graph, give_camera_mat=False, kitti_format=False):
-        all_poses = self.get_all_cam_matricies(give_camera_mat=True, graph=graph)
-        with open(file_name, "w") as f:
-
-            if self.rectifying_H_mats:
-                assert len(self.rectifying_H_mats) == len(all_poses), "Number of rectifying mats and number of poses do not match"
-                print("Using rectifying homographies when writing poses to file.")
-            count = 0
-            for submap_index, submap in enumerate(self.ordered_submaps_by_key()):
-                if submap.get_lc_status():
+    def get_all_poses_and_frame_ids(self, graph):
+        all_poses = self.get_all_cam_matricies(graph)
+        frame_ids, rotations, translations = [], [], []
+        seen_frame_ids = set()
+        count = 0
+        for submap in self.ordered_submaps_by_key():
+            if submap.get_lc_status():
+                continue
+            for frame_id in submap.get_frame_ids():
+                pose = all_poses[count]
+                count += 1
+                if frame_id in seen_frame_ids:
+                    # With --overlapping_window_size > 1, each submap's leading `overlap`
+                    # frames physically duplicate the previous submap's trailing frames
+                    # (same image, independently re-solved). Keeping every copy would make
+                    # the frame_id/time-ordered sequence jump backward at every submap
+                    # boundary, which breaks chronological consumers like GPS time-matching
+                    # and road map-matching (vggt_slam/gps_fusion.py).
                     continue
-                frame_ids = submap.get_frame_ids()
-                print(frame_ids)
-                for frame_index, frame_id in enumerate(frame_ids):
-                    pose = all_poses[count]
-                    K, rotation_matrix, t, scale = decompose_camera(pose)
-                    # print("Decomposed K:\n", K)
-                    count += 1
-                    x, y, z = t
-                    if kitti_format:
-                        pose_matrix = np.eye(4)
-                        pose_matrix[:3, :3] = rotation_matrix
-                        pose_matrix[:3, 3] = t
-                        output = pose_matrix.flatten()[:-4]
-                        output = np.array([float(frame_id), *output])
-                    else:
-                        quaternion = R.from_matrix(rotation_matrix).as_quat() # x, y, z, w
-                        output = np.array([float(frame_id), x, y, z, *quaternion])
-                    f.write(" ".join(f"{v:.8f}" for v in output) + "\n")    
+                seen_frame_ids.add(frame_id)
+                _, rotation_matrix, t, _ = decompose_camera(pose)
+                frame_ids.append(float(frame_id))
+                rotations.append(rotation_matrix)
+                translations.append(t)
+        return np.array(frame_ids), np.stack(rotations), np.stack(translations)
 
     def write_points_to_file(self, graph, file_name):
         pcd_all = []
