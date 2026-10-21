@@ -776,7 +776,7 @@ def main():
             err = (f"gpu_worker process (pid={w.pid}) died without completing this clip "
                    f"(exitcode={w.exitcode}) -- likely an OOM/SIGKILL or a fatal CUDA/driver "
                    f"crash, neither catchable as a Python exception")
-            manifest_f.write(json.dumps({"clip_id": lost["clip_id"], "gpu": None, "ok": False,
+            manifest_f.write(json.dumps({"clip_id": lost["clip_id"], "ok": False,
                                           "error": err}) + "\n")
             manifest_f.flush()
             print(f"[{done}/{submitted}] FAIL (worker died) {lost['clip_id']}: {err}",
@@ -800,7 +800,9 @@ def main():
             in_progress.pop(res["pid"], None)
             done += 1
             extract_slot.release()
-            manifest_f.write(json.dumps(res) + "\n")
+            # gpu / pid only identify the worker process (used for the progress line below and for crash
+            # bookkeeping); they are not part of the manifest row
+            manifest_f.write(json.dumps({k: v for k, v in res.items() if k not in ("gpu", "pid")}) + "\n")
             manifest_f.flush()
             status = "OK" if res["ok"] else "FAIL"
             print(f"[{done}/{submitted}] {status} gpu{res['gpu']} {res['seconds']:.1f}s {res['clip_id']}", flush=True)

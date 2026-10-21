@@ -30,6 +30,9 @@ agrees with the fused scale (`scale_check.adjudication` = gps_length_supports_fu
 `scale_check.confidence` is "low" for noisy depth estimates (scale_rel_iqr > 0.25), which are judged on their
 whole interquartile range instead of the median (see scale_check()).
 
+Every row is normalized to a fixed schema (normalize_row): all keys always present, null when not applicable,
+no gpu/pid.
+
 With --qc_csv every row also gets `pose_source` (fused / metric / none) and `pose_source_reason`:
 the single field downstream consumers should branch on (see pose_source() below).
 
@@ -217,6 +220,39 @@ def adjudicate(chk, q):
     return None
 
 
+# ---- row schema (README, "manifest.jsonl row schema"): every key below is ALWAYS present, null when it does not
+# apply, so a reader never needs `if key in row`. Unknown extra keys are kept after the known ones.
+TOP_KEYS = ("clip_id", "ok", "seconds", "fixed_intrinsics", "fixed_intrinsics_inferred", "stage", "error", "gps_fusion", "qc", "metric_scale",
+            "scale_check", "pose_source", "pose_source_reason")
+GPS_FUSION_KEYS = ("status", "error", "region_used", "used_fallback", "network_profile_used", "matched_keyframes",
+                   "total_keyframes", "map_match_error_mean_m", "map_match_error_max_m", "map_match_error_n_points")
+METRIC_SCALE_KEYS = ("source", "scale", "scale_p25", "scale_p75", "scale_rel_iqr", "n_frames_used", "model",
+                     "scale_transferred", "transfer_residual", "gps_fusion_scale", "depth_scale", "status", "reason", "error")
+SCALE_CHECK_KEYS = ("depth_scale", "ratio", "verdict", "confidence", "n_frames_used", "scale_rel_iqr", "adjudication")
+DROPPED_KEYS = ("gpu", "pid")  # worker bookkeeping of older batch_infer versions, not part of the row
+
+
+def _fill(d, keys):
+    d = dict(d or {})
+    out = {k: d.pop(k, None) for k in keys}
+    out.update(d)
+    return out
+
+
+def normalize_row(r):
+    """The row with the uniform schema above (and without gpu / pid)."""
+    r = {k: v for k, v in r.items() if k not in DROPPED_KEYS}
+    r["gps_fusion"] = _fill(r.get("gps_fusion"), GPS_FUSION_KEYS)
+    ms = _fill(r.get("metric_scale"), METRIC_SCALE_KEYS)
+    if ms["source"] == "metric_depth" and ms["scale_transferred"] is None:
+        ms["scale_transferred"] = False
+    r["metric_scale"] = ms
+    r["scale_check"] = _fill(r.get("scale_check"), SCALE_CHECK_KEYS)  # all null = not cross-checked
+    if r.get("fixed_intrinsics_inferred") is None:
+        r["fixed_intrinsics_inferred"] = False  # recorded by batch_infer.py (True only for backfilled rows)
+    return _fill(r, TOP_KEYS)
+
+
 def pose_source(r):
     """The one field downstream should branch on: which poses of this clip's result.npz to use.
         fused   fused_poses   (clip_qc route use_fused: GPS/road-fused, metric; also route
@@ -305,6 +341,7 @@ def main():
     summary = Counter()
     for r in rows:
         cid = r["clip_id"]
+        r.pop("scale_check", None)  # recomputed below for needs_scale_check rows; never keep a stale one
         route = (qc.get(cid) or {}).get("route")
         if route == "needs_scale_check":
             gps = gps_scale.get(cid)
@@ -348,6 +385,7 @@ def main():
         if "qc" in r:
             r["pose_source"], r["pose_source_reason"] = pose_source(r)
         summary[entry["source"] or ("failed" if entry.get("status") else "none")] += 1
+    rows = [normalize_row(r) for r in rows]
     print("metric_scale source counts:", dict(summary))
     if args.dry_run:
         return
