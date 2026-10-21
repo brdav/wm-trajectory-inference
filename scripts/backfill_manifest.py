@@ -14,9 +14,11 @@ video in the sample manifest; the existing manifest predates that. This script
      that file into the session folder when it computes the undistortion maps from the camera calibration, so a
      session without it was processed entirely with self-calibration. Rows with a recorded value keep it.
      The rule is checked against all rows that have a recorded value and the script stops below 99% agreement
-     (it is 99.2%: for a single clip the original run falls back to self-calibration on any exception in that
-     step, which leaves the session's maps in place; such clips look calibrated under this rule, about 0.8% of the
-     inferred rows, and cannot be told apart). Every row touched by this rule is marked
+     (it is 99.2%). The 576 disagreements are single clips recorded False in sessions that do have the maps; all of them
+     were processed after the maps existed and they are spread evenly over the run. The cause is not known: the code
+     self-calibrates a clip when its camera-metadata lookup (_resolve_camera_meta, which swallows every exception)
+     returned nothing, and that lookup succeeds for them today. About 0.8% of the inferred True values (about 375 rows)
+     can therefore be wrong and cannot be told apart. Every row touched by this rule is marked
      fixed_intrinsics_inferred = true.
 and writes the manifest in place after saving a timestamped backup next to it. Run
 scripts/update_manifest_metric_scale.py afterwards (it normalizes every row to the fixed schema and fills qc /
