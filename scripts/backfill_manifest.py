@@ -9,8 +9,9 @@ video in the sample manifest; the existing manifest predates that. This script
      video's resolution, batch_infer._resolve_camera_meta) AND the undistortion maps can be computed from it
      (the two conditions of the original run). Before
      changing anything it re-computes the value for a sample of rows that already have it and requires the two to
-     agree (>= 99%); otherwise it stops. The recorded value was False for ~0.6% of clips that do have usable
-     calibration (transient fallbacks to self-calibration), so an inferred True can be wrong for a few hundred
+     agree (>= 99%); otherwise it stops. Over all 72,829 rows that have the recorded value the agreement is 99.2%: the
+     recorded value was False for 0.8% of clips that do have usable calibration (the original run falls back to
+     self-calibration on any exception in that step), so an inferred True can be wrong for about 375
      rows; every filled row is marked fixed_intrinsics_inferred = true,
   3. removes rows of videos that are not in the sample manifest (a leftover of an earlier dataset listing); the removed
      rows are saved next to the manifest backups so nothing is lost,
