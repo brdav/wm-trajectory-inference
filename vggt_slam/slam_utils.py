@@ -37,7 +37,8 @@ def _atomic_savez(path, **fields):
 
 def save_result_npz(path, frame_ids, slam_rotations, slam_translations, extraction_fps, video,
                      fused_rotations=None, fused_translations=None, matched_line=None,
-                     snapped=None, gps_fusion_info=None):
+                     snapped=None, gps_fusion_info=None, metric_scale=None, metric_poses=None,
+                     metric_scale_info=None):
     """Writes one consolidated per-clip result file: the raw SLAM trajectory plus (once
     available) the GPS-fused trajectory, matched route, and per-point snap -- replaces the old
     poses.npz + poses_gps_fused.npz + poses_gps_route.wkt + poses_gps_snapped.npy, whose file
@@ -51,6 +52,13 @@ def save_result_npz(path, frame_ids, slam_rotations, slam_translations, extracti
     the whole process), and again after GPS fusion finishes (success or failure) with the
     slam_* arguments unchanged and whichever fusion fields are now available. See
     load_result_npz for the read side and exact optional-field semantics.
+
+    metric_scale / metric_poses / metric_scale_info: the depth-based metric scale from
+    scripts/estimate_metric_scale.py (for clips without usable GPS fusion): meters per SLAM unit,
+    the slam poses with translation * metric_scale (N,4,4), and a dict of provenance/quality
+    stats (stored as JSON). Kept separate from fused_* on purpose: fused_poses are GPS/road
+    grounded, these are an estimate from monocular metric depth. Anything that rewrites an
+    existing result.npz (e.g. scripts/refuse_gps.py) must pass these through or they are lost.
 
     gps_fusion_info: the same dict already returned to callers and written to manifest.jsonl
     (status, region_used, network_profile_used, matched_keyframes, total_keyframes,
@@ -74,6 +82,12 @@ def save_result_npz(path, frame_ids, slam_rotations, slam_translations, extracti
         fields["snapped"] = np.asarray(snapped)
     if gps_fusion_info is not None:
         fields["gps_fusion_json"] = np.asarray(json.dumps(gps_fusion_info))
+    if metric_scale is not None:
+        fields["metric_scale"] = np.asarray(metric_scale, dtype=float)
+    if metric_poses is not None:
+        fields["metric_poses"] = np.asarray(metric_poses)
+    if metric_scale_info is not None:
+        fields["metric_scale_json"] = np.asarray(json.dumps(metric_scale_info))
 
     _atomic_savez(path, **fields)
 
@@ -84,7 +98,9 @@ def load_result_npz(path):
     (fused_rotations/fused_translations/snapped/matched_route_wkt/gps_fusion_info) are None
     when that clip's fusion wasn't attempted or didn't reach that stage -- mirrors the exact
     three-tier semantics the old separate-files layout expressed via file existence (SLAM-only /
-    SLAM+placement-no-route / full success), just via dict values instead of sibling files."""
+    SLAM+placement-no-route / full success), just via dict values instead of sibling files.
+    metric_scale/metric_poses/metric_scale_info are None unless scripts/estimate_metric_scale.py's
+    result was integrated for this clip (see scripts/integrate_metric_scale.py)."""
     data = np.load(path)
     out = {
         "frame_ids": data["frame_ids"],
@@ -94,6 +110,7 @@ def load_result_npz(path):
         "video": str(data["video"]),
         "fused_rotations": None, "fused_translations": None,
         "snapped": None, "matched_route_wkt": None, "gps_fusion_info": None,
+        "metric_scale": None, "metric_poses": None, "metric_scale_info": None,
     }
     if "fused_poses" in data:
         out["fused_rotations"] = data["fused_poses"][:, :3, :3]
@@ -104,6 +121,12 @@ def load_result_npz(path):
         out["matched_route_wkt"] = str(data["matched_route_wkt"])
     if "gps_fusion_json" in data:
         out["gps_fusion_info"] = json.loads(str(data["gps_fusion_json"]))
+    if "metric_scale" in data:
+        out["metric_scale"] = float(data["metric_scale"])
+    if "metric_poses" in data:
+        out["metric_poses"] = data["metric_poses"]
+    if "metric_scale_json" in data:
+        out["metric_scale_info"] = json.loads(str(data["metric_scale_json"]))
     return out
 
 

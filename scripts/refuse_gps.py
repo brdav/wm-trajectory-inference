@@ -139,7 +139,12 @@ def refuse_one(clip):
                          loaded["slam_translations"], loaded["extraction_fps"], loaded["video"],
                          fused_rotations=fused_rot, fused_translations=fused_trans,
                          matched_line=matched_line, snapped=snapped,
-                         gps_fusion_info=gps_fusion_info)
+                         gps_fusion_info=gps_fusion_info,
+                         # depth-based metric scale (scripts/integrate_metric_scale.py) is
+                         # independent of GPS fusion -- carry it over, don't drop it on rewrite
+                         metric_scale=loaded.get("metric_scale"),
+                         metric_poses=loaded.get("metric_poses"),
+                         metric_scale_info=loaded.get("metric_scale_info"))
 
     network_dir = out_dir / "osm_network"
     try:

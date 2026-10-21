@@ -629,6 +629,9 @@ def build_arg_parser():
                     help="Also road-align via each clip's sibling FRONT_*.csv (extra per-clip OSM lookups). "
                          "On by default; pass --no-gps_fusion to skip if this bottlenecks a very large batch")
     p.add_argument("--force", action="store_true", help="Reprocess clips even if out_dir/result.npz already exists")
+    p.add_argument("--dense_log", action="store_true",
+                    help="Also write the full dense point cloud (result_points.pcd) per clip. Off by default "
+                         "(too much storage across a full batch); meant for single-clip debugging runs")
     # Passthrough knobs mirroring main.py's own defaults; batch runs never use
     # vis_map/vis_imgs/run_os/vis_flow (headless) or dense point-cloud logging (too much
     # storage across many clips). use_ray_pose/overlapping_window_size/ref_view_strategy and
@@ -726,7 +729,7 @@ def main():
         use_ray_pose=True, ref_view_strategy="middle",
         vis_map=False, vis_imgs=False, vis_voxel_size=None, run_os=False, vis_flow=False,
         headless=True,
-        log_results=True, skip_dense_log=True, log_path="result.npz",
+        log_results=True, skip_dense_log=not args.dense_log, log_path="result.npz",
         submap_size=args.submap_size, overlapping_window_size=2,
         max_loops=args.max_loops, min_disparity=args.min_disparity,
         conf_threshold=args.conf_threshold, lc_thres=args.lc_thres,
