@@ -6,11 +6,13 @@
 #SBATCH --nodes=1
 #SBATCH --exclusive
 #SBATCH --gres=gpu:4
-#SBATCH --output=/capstor/store/cscs/swissai/ab036/dbrggema/natix_traj/logs/%x_%j.log
+#SBATCH --output=/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/_pipeline/logs/%x_%j.log
 #SBATCH --signal=B:SIGUSR1@300
 #
-# Runs scripts/batch_infer.py over the full natix dataset, self-resubmitting as a new job every
-# time the walltime above runs out, until the whole dataset is done. Submit once:
+# Runs scripts/batch_infer.py over every source video listed in the dataset's sample manifest (parquet; see
+# vggt_slam/sample_manifest.py -- the dataset tree is not walked), self-resubmitting as a new job every time the
+# walltime above runs out, until everything is done; then packs the output into session zips
+# (scripts/pack_sessions.py). Submit once:
 #
 #   sbatch scripts/run_full_dataset.sbatch
 #
@@ -28,9 +30,9 @@
 # Why self-resubmit at all: at the throughput measured for --workers_per_gpu 4 (~22 clips/min on
 # this node, see conversation notes), the full ~120k-clip dataset takes on the order of 90 hours
 # -- far longer than the "normal" partition's 12h limit -- so one job can only ever make partial
-# progress. batch_infer.py is explicitly designed for this: it streams clip discovery and skips
-# any clip whose out_dir/result.npz already exists (see discover_clips's docstring), so simply
-# resubmitting picks up exactly where the last job left off. This script automates that: it
+# progress. batch_infer.py is explicitly designed for this: it skips every manifest video that is already
+# processed (a loose result.npz, an ok row in $OUT_ROOT/manifest.jsonl, or its result inside the session's zip --
+# see discover_clips's docstring), so simply resubmitting picks up exactly where the last job left off. This script automates that: it
 # resubmits itself unless batch_infer.py exited 0, which only happens when discover_clips found
 # nothing left to process (i.e. the dataset is actually done) -- any other exit (walltime hit,
 # a transient crash, ...) means there's still work left, so it retries rather than requiring
@@ -74,31 +76,40 @@
 # parallel (safe today: every node/job independently skips whatever already has a result.npz).
 #
 # To stop the chain (e.g. to investigate a repeated crash instead of letting it keep retrying):
-#   touch /capstor/store/cscs/swissai/ab036/dbrggema/natix_traj/STOP
+#   touch /capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/_pipeline/STOP
 # A currently-running job finishes its current 12h slice either way; it just won't resubmit.
 #
-# 2026-08-26: discover_clips now caches the full list of dataset_root's video paths at
-# $OUT_ROOT/all_video_paths.txt on first use, instead of re-walking the whole ~120k-clip source
-# tree on every one of this script's dozens of resubmissions over a full backlog run (that walk
-# alone was taking well over a minute; see conversation notes on the same filesystem strain that
-# motivated consolidating each clip's own output into a single result.npz). The cache assumes
-# dataset_root is static once delivered -- if genuinely new clips are added later, delete that
-# file to force a fresh walk on the next invocation.
+# To process more data: add its source videos to the sample manifest (same columns) and submit this script
+# again. Videos already processed are skipped, new clips of an already-packed session are processed and
+# merged into that session's zip by the packing step. Afterwards run scripts/run_metric_scale.sbatch
+# (QC, depth-based scale for clips without a trusted GPS scale, manifest fields).
+#
+# Everything is written under $OUT_ROOT (the trajectories folder): per-clip results (session zips after the
+# packing step), manifest.jsonl, and job logs / STOP file / resubmit counter in $OUT_ROOT/_pipeline/.
+# OUT_ROOT, DATASET_ROOT and SAMPLE_MANIFEST can be overridden from the environment, e.g. to test on a few
+# clips: sbatch --export=ALL,OUT_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch
 
 set -uo pipefail
 
-OUT_ROOT=/capstor/store/cscs/swissai/ab036/dbrggema/natix_traj
-DATASET_ROOT=/capstor/store/cscs/swissai/ab036/datasets/natix
-REPO_DIR=/users/dbrggema/VGGT-SLAM
-STOP_FILE="$OUT_ROOT/STOP"
-RESUBMIT_COUNT_FILE="$OUT_ROOT/.resubmit_count"
+OUT_ROOT="${OUT_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories}"
+DATASET_ROOT="${DATASET_ROOT:-/capstor/store/cscs/swissai/ab036/datasets/natix}"
+SAMPLE_MANIFEST="${SAMPLE_MANIFEST:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/manifest/samples_24fps.parquet}"
+PIPELINE_DIR="$OUT_ROOT/_pipeline"
+
+# The SLAM loop-closure model (SALAD) needs dino_salad.ckpt and the DINOv2 torch.hub repo in a torch hub cache
+# (README, "Model weights"); the depth model weights are downloaded into HF_HOME on first use.
+export TORCH_HOME="${TORCH_HOME:-/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home}"
+export HF_HOME="${HF_HOME:-/iopsstor/scratch/cscs/dbrggema/hf_home}"
+REPO_DIR=/users/dbrggema/wm_trajectory_inference
+STOP_FILE="$PIPELINE_DIR/STOP"
+RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
 MAX_RESUBMITS=40  # generous headroom over the ~8 links a 90h run at 12h/job would need -- a
                    # backstop against silently burning allocation hours if something is stuck
                    # crash-looping on the same clip (see batch_infer.py's per-clip try/except:
                    # a crash that kills the whole process, e.g. an OOM, doesn't mark that clip as
                    # failed, so a resubmitted job retries the exact same clip from scratch).
 
-mkdir -p "$OUT_ROOT/logs"
+mkdir -p "$PIPELINE_DIR/logs"
 
 # Read once here, at script start (before batch_infer.py's 16 GPU workers start hammering the
 # shared Lustre filesystem with their own result.npz/osm_network writes), NOT inside
@@ -143,6 +154,7 @@ echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME ==="
 srun --environment=vggtslam_env python3 -u "$REPO_DIR/scripts/batch_infer.py" \
     --dataset_root "$DATASET_ROOT" \
     --out_root "$OUT_ROOT" \
+    --sample_manifest "$SAMPLE_MANIFEST" \
     --fps 10 \
     --num_gpus 4 \
     --workers_per_gpu 4 &
@@ -153,7 +165,17 @@ EXIT_CODE=$?
 echo "=== $(date -Iseconds) job $SLURM_JOB_ID: batch_infer.py exited $EXIT_CODE ==="
 
 if [ "$EXIT_CODE" -eq 0 ]; then
-    echo "=== dataset fully processed, not resubmitting ==="
+    echo "=== everything in the sample manifest is processed, not resubmitting ==="
+    # Archive finished sessions into one zip each (inode count; this is the layout every later stage reads).
+    # --min_age_days 0: this job's batch_infer.py has just finished, nothing is still writing. Sessions that
+    # already have a zip get the new clips merged in; sessions with a clip still missing stay loose.
+    echo "=== $(date -Iseconds) packing sessions into zips"
+    srun --environment=vggtslam_env python3 -u "$REPO_DIR/scripts/pack_sessions.py" \
+        --dataset_root "$DATASET_ROOT" \
+        --out_root "$OUT_ROOT" \
+        --sample_manifest "$SAMPLE_MANIFEST" \
+        --min_age_days 0 || { echo "pack_sessions.py failed -- output is intact but not packed; rerun it by hand" >&2; exit 1; }
+    echo "=== $(date -Iseconds) done. Next: sbatch scripts/run_metric_scale.sbatch"
     exit 0
 fi
 

@@ -11,10 +11,12 @@ Below are the commands used to process Natix:
 
 | Task | Command |
 |---|---|
-| Full dataset, self-resubmitting until done | `sbatch scripts/run_full_dataset.sbatch` |
-| Post-process after the full run: QC, depth-based metric scale for clips without a usable GPS scale, merge into `result.npz` + manifest | `sbatch scripts/run_metric_scale.sbatch` |
-| Download OSM road-network extracts (should be done first once, before GPS fusion) | `python scripts/download_osm_extracts.py --out_dir <dir>` |
-| Archive / restore finished sessions (inode cleanup) | `python scripts/pack_sessions.py ...` / `scripts/unpack_sessions.py ...` |
+| Process every source video in the dataset's sample manifest (self-resubmitting until done, packs the output into session zips at the end) | `sbatch scripts/run_full_dataset.sbatch` |
+| Then: QC, depth-based metric scale for clips without a usable GPS scale, merge into `result.npz` + `manifest.jsonl` | `sbatch scripts/run_metric_scale.sbatch` |
+| Download OSM road-network extracts (once, and for any new country, before GPS fusion) | `python scripts/download_osm_extracts.py --out_dir <dir>` |
+| Take a packed session apart again to edit it | `python scripts/unpack_sessions.py ...` |
+
+New data? See [Processing new data](#processing-new-data).
 
 Every script's own `--help` / module docstring has the full flag list. The full run produces one
 `result.npz` per clip — see [Loading a clip's trajectory](#loading-a-clips-trajectory) below.
@@ -22,9 +24,47 @@ Every script's own `--help` / module docstring has the full flag list. The full 
 **Other datasets (no intrinsics metadata, no GPS):** intrinsics and GPS already degrade
 gracefully — with no sibling `FIXED_METADATA.json`, `batch_infer.py` automatically falls back to
 `--shared_intrinsics`; with no sibling GPS `.csv` (or `--no-gps_fusion`), GPS fusion is just
-skipped. The one real Natix-specific piece is clip *discovery*: `--dataset_root` batch mode only
-finds videos inside directories literally named `FRONT_FOLDER`. For another layout,
-generalize `_iter_front_folder_mp4s` in `scripts/batch_infer.py`.
+skipped. Which videos to process comes from a sample manifest (below), so for another dataset provide a
+parquet with a `source_video_path` column (paths relative to `--dataset_root`, laid out as
+`<Country>/.../<session>/<HH-MM-SS>/FRONT_FOLDER/<video>.mp4`) and pass `--dataset_root`, `--out_root` and
+`--sample_manifest` (or the `DATASET_ROOT` / `OUT_ROOT` / `SAMPLE_MANIFEST` environment variables of the sbatch).
+
+## Processing new data
+
+The pipeline has two sbatch jobs, run one after the other; everything is resumable and skips what is done.
+
+**What drives it: the sample manifest.** `/capstor/store/cscs/swissai/ab036/processed_datasets/natix/manifest/samples_24fps.parquet`
+(also available hive-partitioned as `manifest/samples_24fps/country=*/part.parquet`) lists the dataset's 5 s samples;
+its `source_video_path` column names the full source video of each. The pipeline processes whole source videos,
+so the work list is the set of unique `source_video_path`s (120,026 today). The dataset tree is never walked and
+no path cache exists. Read via `vggt_slam/sample_manifest.py`.
+
+**To process more data**
+1. Put the videos on the dataset root and get them into the sample manifest (same columns). New countries also
+   need their OSM extracts (`scripts/download_osm_extracts.py`), otherwise GPS fusion is skipped for them.
+2. `sbatch scripts/run_full_dataset.sbatch` (SLAM + GPS fusion, `batch_infer.py`). A video is skipped if it already
+   has a loose `result.npz`, an ok row in `trajectories/manifest.jsonl`, or its `result.npz` inside its session
+   zip. The job resubmits itself every 12 h until nothing is left (stop it with
+   `touch trajectories/_pipeline/STOP`; counter in `_pipeline/.resubmit_count`, max 40). When everything is
+   done it **packs the output into session zips** (`scripts/pack_sessions.py`): one zip per session, only for
+   sessions in which every manifest video has a result; clips of a session that already has a zip are
+   **merged into it**. It prints the next command.
+3. `sbatch scripts/run_metric_scale.sbatch`: QC of every clip, depth-based scale for the clips that need one,
+   and the `qc` / `metric_scale` / `pose_source` fields of `manifest.jsonl`. See
+   [Which poses to use](#which-poses-to-use-downstream).
+
+Logs of both jobs: `trajectories/_pipeline/logs/`. To try the pipeline on a handful of clips without touching
+the real output, give the first job a small manifest and a scratch output folder:
+`sbatch --export=ALL,OUT_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch`
+(link `_osm_extracts` into `$OUT_ROOT` for GPS fusion).
+
+**Model weights.** The SLAM loop closure needs `dino_salad.ckpt` and the DINOv2 `torch.hub` repo in a torch hub
+cache: `$TORCH_HOME/hub/checkpoints/dino_salad.ckpt` (download from
+`https://github.com/serizba/salad/releases/download/v1.0.0/dino_salad.ckpt`) and
+`$TORCH_HOME/hub/facebookresearch_dinov2_main/` (cloned by `torch.hub` on first use, needs internet). The sbatch files
+set `TORCH_HOME` to `/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home`, which holds both; that is scratch,
+so it can be purged, and `~/.cache/torch/hub` does not have them. The depth models (DA3) download into `HF_HOME`
+(`/iopsstor/scratch/cscs/dbrggema/hf_home`) on first use.
 
 ## Rebuild image (Podman + Enroot)
 
@@ -53,7 +93,7 @@ trajectories/
                                 the clip has them -- WHICH ONE TO USE is `pose_source` in manifest.jsonl
   manifest.jsonl                one row per clip: gps_fusion, qc, metric_scale, scale_check, pose_source -- start here
   qc_config.json                provenance of those fields: QC version, git commits, every threshold, counts
-  all_video_paths.txt, packed_sessions.jsonl, _osm_extracts/    inputs / bookkeeping of batch_infer + pack_sessions
+  packed_sessions.jsonl, _osm_extracts/    bookkeeping of pack_sessions, OSM extracts used by GPS fusion
   _pipeline/                    records of the post-processing (stages 2-5), not needed to USE the poses:
     clip_qc.csv (+ .config.json)     stage 2 output, all QC metrics per clip (also copied into manifest.jsonl's qc)
     manifest_metric_scale.jsonl      stage 3 record per clip: depth scale, spread, frames used, or why it failed

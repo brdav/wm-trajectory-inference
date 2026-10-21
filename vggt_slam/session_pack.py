@@ -12,9 +12,10 @@ why (refuse_gps.py already re-touches old, already-"finished" clips, so packing 
 session will never need writing to again; it can only make that the exception, not something
 every reader has to handle transparently).
 
-is_session_packed is the one bit of packing-awareness the live pipeline needs regardless: without
-it, discover_clips's skip check (`(out_dir / "result.npz").exists()`) would see a packed clip's
-now-missing out_dir and burn GPU time reprocessing it from scratch.
+Packing-awareness in the live pipeline: scripts/batch_infer.py's discover_clips treats a clip as done if
+its result.npz is loose, has an ok row in manifest.jsonl, or is a member of the session zip
+(session_zip_path). A packed session is therefore NOT assumed complete: a clip added to it later is processed,
+and scripts/pack_sessions.py merges it into the existing zip.
 """
 from vggt_slam.undistort import session_cache_dir
 

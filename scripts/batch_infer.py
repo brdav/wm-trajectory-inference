@@ -11,11 +11,9 @@ once inside an allocation that already has the vggtslam_image container attached
         --out_dir /capstor/store/cscs/swissai/ab036/.../poses_out/france \\
         --num_gpus 1
 
-    # Whole dataset:
-    srun --environment=vggtslam_env python scripts/batch_infer.py \\
-        --dataset_root /capstor/store/cscs/swissai/ab036/datasets/natix \\
-        --out_root /capstor/store/cscs/swissai/ab036/.../poses_out \\
-        --num_gpus 4
+    # Everything listed in the dataset's sample manifest (what scripts/run_full_dataset.sbatch does; the
+    # manifest, dataset root and output root default to the natix locations, see vggt_slam/sample_manifest.py):
+    srun --environment=vggtslam_env python scripts/batch_infer.py --num_gpus 4
 
 Architecture (see conversation / README for the "why"):
   - One persistent GPU worker process per GPU (--num_gpus x --workers_per_gpu), each loading
@@ -36,8 +34,12 @@ Architecture (see conversation / README for the "why"):
     high-resolution clip (e.g. 2896x1876 vs 1280x960 for other natix clips seen so far) can
     otherwise dominate one extract-worker slot for far longer than a same-length clip at lower
     resolution.
-  - Already-completed clips (an existing result.npz) are skipped, so a run that hits the
-    Slurm wall-time limit can simply be resubmitted to pick up where it left off.
+  - Which clips to process comes from the dataset's sample manifest (--sample_manifest, parquet of 5 s
+    samples; its `source_video_path` column names the full source videos), not from walking the
+    dataset tree. Already-processed clips are skipped, so a run that hits the Slurm wall-time limit can
+    simply be resubmitted to pick up where it left off: a clip counts as done if it has a loose
+    result.npz, an ok row in <out_root>/manifest.jsonl, or its result.npz inside its session's
+    zip (scripts/pack_sessions.py archives finished sessions).
   - GPS/road-fusion (main.py's --gps_csv path) is ON by default: it map-matches against live
     OSM data per clip, using each video's sibling FRONT_*.csv automatically (no registry --
     just same basename, .csv extension). This is a per-clip external-network dependency, so
@@ -76,6 +78,7 @@ import sys
 import threading
 import time
 import traceback
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -93,7 +96,9 @@ os.environ.setdefault("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=4000000"
 
 sys.path.insert(0, str(REPO_DIR))
 from vggt_slam import country_regions, us_regions
-from vggt_slam.session_pack import is_session_packed
+from vggt_slam.sample_manifest import (DEFAULT_DATASET_ROOT, DEFAULT_SAMPLE_MANIFEST, DEFAULT_TRAJECTORY_ROOT,
+                                       source_videos)
+from vggt_slam.session_pack import session_zip_path
 from vggt_slam.undistort import compute_undistort_maps, save_undistort_maps, session_cache_dir
 
 _CONTAINER_BOXES = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"edts"}
@@ -184,21 +189,6 @@ def _resolve_camera_meta(video_path):
         }
     except Exception:
         return None
-
-
-def _iter_front_folder_mp4s(root):
-    # os.walk + per-directory sort instead of sorted(root.rglob(...)): rglob's result must be
-    # fully materialized before sorted() can return anything, which forces a complete walk of
-    # the entire (~120k-clip, 28-country) tree before even one clip is available -- with
-    # --limit or without, that leaves all 4 GPUs idle for the whole scan. Sorting only within
-    # each directory keeps traversal order deterministic at negligible cost and lets the caller
-    # start processing the first clip immediately.
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
-        if os.path.basename(dirpath) == "FRONT_FOLDER":
-            for fname in sorted(filenames):
-                if fname.endswith(".mp4"):
-                    yield Path(dirpath) / fname
 
 
 # Some clips are filed under the wrong country folder in this dataset (confirmed: an "Austria"
@@ -330,73 +320,70 @@ def _region_candidates(rel_path, video_path, osm_extracts_dir):
     return _region_pbf_path(rel_path, osm_extracts_dir), _fallback_region_pbf_paths(rel_path, osm_extracts_dir)
 
 
-VIDEO_PATHS_CACHE_NAME = "all_video_paths.txt"
-
-
-def _discover_all_video_paths(dataset_root, out_root):
-    """Streams every FRONT_*.mp4 under dataset_root, same order as _iter_front_folder_mp4s.
-    Uses a cached flat-text manifest at out_root/all_video_paths.txt if present instead of
-    walking dataset_root -- run_full_dataset.sbatch resubmits itself roughly every 12h until the
-    whole ~120k-clip backlog is done (dozens of times over a full run), and dataset_root is the
-    delivered, effectively-immutable source dataset, so re-walking its entire tree on every one
-    of those resubmissions re-pays the same cost for the same, unchanging answer. If the dataset
-    ever grows with genuinely new clips, delete this cache file to force a fresh walk.
-
-    Written incrementally as the walk actually happens (line-by-line, flushed) rather than
-    materializing the whole list before yielding the first path -- so a cache MISS doesn't lose
-    _iter_front_folder_mp4s's own streaming property (starting extraction on the first clip
-    before the rest of the tree is walked, see its docstring). The cache file itself is only
-    committed (atomic os.replace) once the walk actually finishes, so a process killed mid-walk
-    (confirmed to happen on this cluster) leaves no cache at all rather than a silently
-    incomplete one -- the next invocation just re-walks from scratch, same as today.
-    """
-    cache_path = Path(out_root) / VIDEO_PATHS_CACHE_NAME
-    if cache_path.exists():
-        with open(cache_path) as f:
+def _processed_clip_ids(out_root):
+    """clip_ids (full source-video paths) with an ok row in <out_root>/manifest.jsonl."""
+    done = set()
+    path = Path(out_root) / "manifest.jsonl"
+    if path.exists():
+        with open(path) as f:
             for line in f:
-                line = line.rstrip("\n")
-                if line:
-                    yield Path(line)
-        return
-
-    print(f"discover_clips: no cached video-path manifest at {cache_path} -- walking "
-          f"{dataset_root} once and caching the result for every future invocation.",
-          flush=True)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_path.with_name(cache_path.name + f".tmp-{os.getpid()}")
-    n = 0
-    with open(tmp_path, "w") as f:
-        for video_path in _iter_front_folder_mp4s(Path(dataset_root)):
-            f.write(str(video_path) + "\n")
-            f.flush()
-            n += 1
-            yield video_path
-    os.replace(tmp_path, cache_path)
-    print(f"discover_clips: cached {n} video paths to {cache_path}", flush=True)
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("ok") is True:
+                    done.add(r["clip_id"])
+    return done
 
 
-def discover_clips(dataset_root, out_root, scratch_dir, countries, limit, force=False, osm_extracts_dir=None):
-    """Streams clip dicts as they're found (a generator, not a list) so extraction can start on
-    the first clip while the rest of the tree is still being walked (see
-    _discover_all_video_paths). Already-processed clips (out_dir/result.npz exists) are skipped
-    here, before the _resolve_camera_meta lookup, unless --force is set.
+_ZIP_MEMBERS = {}
+
+
+def _result_in_session_zip(out_dir):
+    """True if out_dir's session was packed (vggt_slam.session_pack) and the clip's result.npz is
+    inside that zip. A packed session can still be missing a clip that was added to the dataset
+    later -- that clip is NOT done and gets processed (pack_sessions.py then merges it into the zip)."""
+    zp = session_zip_path(out_dir)
+    if not zp.exists():
+        return False
+    names = _ZIP_MEMBERS.get(zp)
+    if names is None:
+        with zipfile.ZipFile(zp) as zf:
+            names = _ZIP_MEMBERS[zp] = set(zf.namelist())
+    return str(out_dir.relative_to(session_cache_dir(out_dir)) / "result.npz") in names
+
+
+def discover_clips(dataset_root, out_root, scratch_dir, countries, limit, force=False, osm_extracts_dir=None,
+                   sample_manifest=DEFAULT_SAMPLE_MANIFEST):
+    """Streams clip dicts for every source video in the sample manifest that is not processed yet (a
+    generator, so extraction can start on the first clip right away). A clip is already processed if it has
+    a loose out_dir/result.npz, an ok row in <out_root>/manifest.jsonl, or its result.npz inside its
+    session zip; --force reprocesses everything. Skipped clips never reach the _resolve_camera_meta lookup.
 
     frames_dir is rooted under scratch_dir (node-local), NOT under out_dir (the shared output
     filesystem) -- see --scratch_dir's help text for why.
     """
-    dataset_root = Path(dataset_root)
-    country_set = set(countries) if countries else None
-    count = 0
-    for video_path in _discover_all_video_paths(dataset_root, out_root):
-        rel = video_path.relative_to(dataset_root)
-        if country_set is not None and rel.parts[0] not in country_set:
-            continue
-        out_dir = Path(out_root) / rel.with_suffix("")
-        # is_session_packed: a clip whose whole session got archived by scripts/pack_sessions.py
-        # has no out_dir on disk at all any more (see vggt_slam/session_pack.py) -- without this
-        # check that looks identical to never-processed and this would silently redo it.
-        if not force and ((out_dir / "result.npz").exists() or is_session_packed(out_dir)):
-            continue
+    dataset_root, out_root = Path(dataset_root), Path(out_root)
+    videos = source_videos(sample_manifest, countries)
+    done = set() if force else _processed_clip_ids(out_root)
+    print(f"discover_clips: {len(videos)} source videos in {sample_manifest}"
+          f"{' (countries: ' + ', '.join(countries) + ')' if countries else ''}; "
+          f"{len(done)} clips have an ok row in {out_root / 'manifest.jsonl'}", flush=True)
+    n_done = n_zip_only = n_new = n_into_packed = 0
+    for rel_str in videos:
+        rel = Path(rel_str)
+        video_path = dataset_root / rel
+        out_dir = out_root / rel.with_suffix("")
+        if not force:
+            if (out_dir / "result.npz").exists() or str(video_path) in done:
+                n_done += 1
+                continue
+            if _result_in_session_zip(out_dir):  # result is in a session zip but has no manifest row
+                n_done += 1
+                n_zip_only += 1
+                continue
+        if session_zip_path(out_dir).exists():
+            n_into_packed += 1  # new clip in an already-packed session; pack_sessions.py will merge it
         region_pbf_path, fallback_region_pbf_paths = _region_candidates(rel, video_path, osm_extracts_dir)
         yield {
             "video_path": video_path,
@@ -406,9 +393,12 @@ def discover_clips(dataset_root, out_root, scratch_dir, countries, limit, force=
             "osm_region_pbf_path": region_pbf_path,
             "osm_fallback_region_pbf_paths": fallback_region_pbf_paths,
         }
-        count += 1
-        if limit and count >= limit:
+        n_new += 1
+        if limit and n_new >= limit:
             return
+    print(f"discover_clips: {n_done} already processed ({n_zip_only} of them only found inside a session zip, "
+          f"without a manifest row), {n_new} to process ({n_into_packed} belong to an already-packed session)",
+          flush=True)
 
 
 def extract_one(clip, fps, ffmpeg_threads=0):
@@ -580,12 +570,13 @@ def gpu_worker(gpu_id, base_args, job_queue, result_queue, keep_frames, gps_fusi
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--video", default=None, help="Single-clip mode: process just this one video file (requires --out_dir). Mutually exclusive with --dataset_root/--out_root")
+    p.add_argument("--video", default=None, help="Single-clip mode: process just this one video file (requires --out_dir). Without --video, batch mode runs over --sample_manifest")
     p.add_argument("--out_dir", default=None, help="Single-clip mode: output dir for --video's result.npz/frames/etc")
-    p.add_argument("--dataset_root", default=None, help="Batch mode: root dir to search for */FRONT_FOLDER/*.mp4 (requires --out_root). Mutually exclusive with --video/--out_dir")
-    p.add_argument("--out_root", default=None, help="Batch mode: root dir to mirror dataset_root's structure into, one subdir per clip")
-    p.add_argument("--countries", nargs="*", default=None, help="Batch mode: restrict to these dataset_root subdirs (e.g. France Latvia). Default: all")
-    p.add_argument("--limit", type=int, default=None, help="Batch mode: only process the first N discovered clips (for testing)")
+    p.add_argument("--dataset_root", default=DEFAULT_DATASET_ROOT, help="Batch mode: dataset root that the sample manifest's relative video paths are resolved against")
+    p.add_argument("--out_root", default=DEFAULT_TRAJECTORY_ROOT, help="Batch mode: root dir to mirror the dataset structure into, one subdir per clip (manifest.jsonl is appended here)")
+    p.add_argument("--sample_manifest", default=DEFAULT_SAMPLE_MANIFEST, help="Batch mode: parquet (or hive-partitioned parquet dir) listing the clips to process; its source_video_path column names the source videos. Nothing walks the dataset tree")
+    p.add_argument("--countries", nargs="*", default=None, help="Batch mode: restrict to these countries (first path component, e.g. France Latvia). Default: all")
+    p.add_argument("--limit", type=int, default=None, help="Batch mode: only process the first N unprocessed clips of the manifest (for testing)")
     p.add_argument("--fps", type=float, default=10.0, help="ffmpeg frame-extraction fps")
     p.add_argument("--num_gpus", type=int, default=4)
     p.add_argument("--workers_per_gpu", type=int, default=1,
@@ -670,13 +661,9 @@ def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    if bool(args.video) == bool(args.dataset_root):
-        parser.error("pass either --video (with --out_dir) for a single clip, or --dataset_root "
-                      "(with --out_root) for batch mode")
     if args.video and not args.out_dir:
         parser.error("--video requires --out_dir")
-    if args.dataset_root and not args.out_root:
-        parser.error("--dataset_root requires --out_root")
+    # without --video this is batch mode over --sample_manifest (dataset root / out root default to the natix locations)
 
     if args.gps_fusion:
         # Needed by vggt_slam.map_match._extract_local_bbox for any clip whose region has a
@@ -696,7 +683,7 @@ def main():
                   "osmium isn't already importable in this container", file=sys.stderr, flush=True)
 
     osm_extracts_dir = args.osm_extracts_dir
-    if osm_extracts_dir is None and args.dataset_root:
+    if osm_extracts_dir is None and not args.video:
         osm_extracts_dir = str(Path(args.out_root) / "_osm_extracts")
 
     if args.video:
@@ -716,12 +703,10 @@ def main():
         }]
         manifest_dir = out_dir
     else:
-        # A generator, not a list: discover_clips streams clips as os.walk finds them, so
-        # extraction (see the ThreadPoolExecutor submission loop below) can start on the first
-        # clip immediately instead of waiting for the whole ~120k-clip tree to be enumerated
-        # first -- see discover_clips's docstring.
+        # A generator, not a list: discover_clips streams clips as it goes, so extraction (see the
+        # ThreadPoolExecutor submission loop below) can start on the first clip immediately.
         clips = discover_clips(args.dataset_root, args.out_root, args.scratch_dir, args.countries,
-                                args.limit, args.force, osm_extracts_dir)
+                                args.limit, args.force, osm_extracts_dir, args.sample_manifest)
         manifest_dir = Path(args.out_root)
 
     base_args = dict(
