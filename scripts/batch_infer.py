@@ -457,7 +457,7 @@ def extract_one(clip, fps, ffmpeg_threads=0):
             save_undistort_maps(str(maps_path), map1, map2, roi)
             # Same atomic-write rationale as save_undistort_maps -- a plain write_text here
             # would be racy now that this cache is shared across a session's concurrent workers.
-            tmp_k_path = new_k_path.with_name(new_k_path.name + f".tmp-{os.getpid()}")
+            tmp_k_path = new_k_path.with_name(new_k_path.name + f".tmp-{os.getpid()}-{threading.get_ident()}")
             tmp_k_path.write_text(json.dumps(result))
             tmp_k_path.replace(new_k_path)
         else:

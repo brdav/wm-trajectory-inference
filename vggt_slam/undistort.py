@@ -11,6 +11,7 @@ Used by scripts/batch_infer.py (computes+caches the maps once per recording sess
 session_cache_dir -- and main.py (loads the cached maps and applies them per selected keyframe).
 """
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -76,7 +77,10 @@ def save_undistort_maps(path, map1, map2, roi):
     corrupted partial read.
     """
     path = str(path)
-    tmp_path = f"{path}.tmp-{os.getpid()}"
+    # unique per thread as well as per process: scripts/batch_infer.py extracts clips in a thread pool inside one
+    # process, and two threads of the same session used to share one temp name (the second os.replace then found
+    # no file and that clip silently fell back to self-calibration)
+    tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
     with open(tmp_path, "wb") as f:
         np.savez(f, map1=map1, map2=map2, roi=np.array(roi, dtype=np.int64))
     os.replace(tmp_path, path)
