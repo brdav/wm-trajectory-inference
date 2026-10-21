@@ -41,6 +41,32 @@ enroot import -o vggtslam_image.sqsh podman://vggtslam_image
 `vggtslam_env`'s Pyxis definition, `~/.edf/vggtslam_env.toml`, points at.)
 
 
+## Where everything lives (`trajectories/`)
+
+All pipeline output is under `/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/`. Nothing is
+written anywhere else except transient files on scratch.
+
+```
+trajectories/
+  <Country>/.../<Session>.zip   one zip per recording session; per clip <HH-MM-SS>/FRONT_FOLDER/FRONT_<ts>/result.npz
+                                with slam_poses always, fused_poses (GPS-fused) and/or metric_poses (depth-scaled) when
+                                the clip has them -- WHICH ONE TO USE is `pose_source` in manifest.jsonl
+  manifest.jsonl                one row per clip: gps_fusion, qc, metric_scale, scale_check, pose_source -- start here
+  qc_config.json                provenance of those fields: QC version, git commits, every threshold, counts
+  all_video_paths.txt, packed_sessions.jsonl, _osm_extracts/    inputs / bookkeeping of batch_infer + pack_sessions
+  _pipeline/                    records of the post-processing (stages 2-5), not needed to USE the poses:
+    clip_qc.csv (+ .config.json)     stage 2 output, all QC metrics per clip (also copied into manifest.jsonl's qc)
+    manifest_metric_scale.jsonl      stage 3 record per clip: depth scale, spread, frames used, or why it failed
+    integration_log.jsonl            stage 4 record per session: which clips got metric_scale / transferred / refused
+    validation/                      QC error-rate measurements (scripts/qc_validation/), figures, clip lists
+    backups/                         copies of files replaced in place (see its README.txt); deletable when no longer wanted
+    logs/                            job logs of stages 2-5 (sbatch output)
+```
+
+Transient: the per-clip depth-scale files (`metric_scale.npz`, with the SLAM rerun's poses and per-frame scales) are
+written to `$SCRATCH/natix_metric_scale_work/` (`--work_dir`) by stage 3 and merged into the zips by stage 4; delete
+that folder whenever you like. To run on new data: run `batch_infer.py`, then `sbatch scripts/run_metric_scale.sbatch`.
+
 ## Which poses to use (downstream)
 
 Processing is a pipeline; each stage can drop or reroute a clip, and the manifest records the
@@ -125,7 +151,7 @@ for line in open(".../trajectories/manifest.jsonl"):
 ## QC validation (how good is the QC?)
 
 All numbers 2026-10-21, from `scripts/qc_validation/` (results, figures and the clip lists live in
-`/capstor/store/cscs/swissai/ab036/dbrggema/natix_metric_scale/qc_validation/`). The only independent reference
+`trajectories/_pipeline/validation/`). The only independent reference
 for a clip's scale is the depth-based one (DA3METRIC-LARGE vs the SLAM point cloud), so every statement below
 is "the two estimates agree / clearly disagree" (ratio depth/GPS in 0.8-1.25 / outside 0.67-1.5), never ground
 truth. A disagreement does not say which estimate is wrong; in some clips it was the depth scale.
@@ -152,7 +178,7 @@ truth. A disagreement does not say which estimate is wrong; in some clips it was
   estimates only (9% of the sample had noisy ones and are not covered); `static` and `too_few_keyframes` clips were checked against GPS extent only, not against depth.
 
 Reproduce: the clip lists and per-clip depth scores are in that folder (`clip_list.txt`, `metric_scores.tar.gz` -> extract to
-`$QC_VALIDATION_DIR/metric`; made with `scripts/estimate_metric_scale.py --clip_list ... --out_root $QC_VALIDATION_DIR/metric`), then
+`$QC_VALIDATION_DIR/metric`; made with `scripts/estimate_metric_scale.py --clip_list ... --pipeline_dir $QC_VALIDATION_DIR/records --work_dir $QC_VALIDATION_DIR/metric`), then
 `QC_VALIDATION_DIR=... python scripts/qc_validation/qc_depth_spotcheck.py` (and `qc_placement.py`).
 
 ### Traceability
@@ -160,14 +186,13 @@ Reproduce: the clip lists and per-clip depth scores are in that folder (`clip_li
 - Each manifest row's `qc.version` and `trajectories/qc_config.json` (QC version, git commit, every threshold,
   route and `pose_source` counts, depth-scale settings) say which QC produced it; `clip_qc.csv.config.json` is
   the same for the QC step alone.
-- `natix_metric_scale/integration_log.jsonl` records, per session zip, which clips got `metric_scale`, which
-  were transferred from a SLAM rerun, and which were refused; `manifest_metric_scale.jsonl` the depth step.
-- Replaced files are kept in `natix_metric_scale/backups/` (see its README.txt); every manifest rewrite now
-  keeps a timestamped `manifest.jsonl.bak_<time>`.
-- The per-clip depth-scale files (`natix_metric_scale/<Country>/.../metric_scale.npz`: rerun poses and per-frame
-  scales) are redundant once integrated; they are archived in `backups/standalone_metric_scale_*.tar.gz` and the
-  estimator skips finished clips via the QC csv and `integration_log.jsonl`, so the trees can be deleted (the
-  sbatch archives them after a run and prints the removal command; it never deletes).
+- `_pipeline/integration_log.jsonl` records, per session zip, which clips got `metric_scale`, which
+  were transferred from a SLAM rerun, and which were refused; `_pipeline/manifest_metric_scale.jsonl` the depth step.
+- Replaced files are kept in `_pipeline/backups/` (see its README.txt); every manifest rewrite now
+  keeps a timestamped `manifest.jsonl.bak_<time>` next to the manifest (move it into `_pipeline/backups/`).
+- The per-clip depth-scale files (rerun poses and per-frame scales) are transient work files in `$SCRATCH` (see
+  "Where everything lives"); the estimator skips finished clips via the QC csv and `integration_log.jsonl`, so deleting
+  them changes no behaviour. A one-time archive of the first 14,773 is `_pipeline/backups/standalone_metric_scale_2026-10-21.tar.gz`.
 
 ## Loading a clip's trajectory
 

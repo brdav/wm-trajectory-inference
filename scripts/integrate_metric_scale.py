@@ -2,7 +2,7 @@
 """Merge scripts/estimate_metric_scale.py's per-clip metric_scale.npz files into the clips' own
 result.npz inside the packed session zips, so each clip stays ONE file.
 
-For every clip with a metric_scale.npz under --metric_root, its result.npz inside
+For every clip with a metric_scale.npz under --work_dir, its result.npz inside
 <traj_root>/<Country/.../Session>.zip gets three extra keys (nothing else is touched):
     metric_scale       meters per SLAM unit (scalar)
     metric_poses       slam_poses with translation * metric_scale, (N,4,4)
@@ -25,10 +25,10 @@ Safety (the zips are shared, archival and not otherwise backed up):
   * --dry_run does all the reading/matching/checking and writes nothing;
   * idempotent: clips whose result.npz already has metric_scale are skipped (--force to redo).
 
-One line per session is appended to <metric_root>/integration_log.jsonl.
+One line per session is appended to <pipeline_dir>/integration_log.jsonl.
 
 Usage:
-    python3 scripts/integrate_metric_scale.py --metric_root .../natix_metric_scale \\
+    python3 scripts/integrate_metric_scale.py --work_dir $SCRATCH/natix_metric_scale_work \\
         --traj_root .../processed_datasets/natix/trajectories --dry_run
     python3 scripts/integrate_metric_scale.py ... [--countries Austria] [--limit_sessions 2] [--workers 16]
 """
@@ -50,7 +50,8 @@ from pathlib import Path
 import numpy as np
 
 DEFAULT_TRAJ_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"
-DEFAULT_METRIC_ROOT = "/capstor/store/cscs/swissai/ab036/dbrggema/natix_metric_scale"
+DEFAULT_PIPELINE_DIR = f"{DEFAULT_TRAJ_ROOT}/_pipeline"  # integration_log.jsonl goes here
+DEFAULT_WORK_DIR = os.path.join(os.environ.get("SCRATCH", "/tmp"), "natix_metric_scale_work")  # per-clip files from estimate_metric_scale.py
 NEW_KEYS = ("metric_scale", "metric_poses", "metric_scale_json")
 # Fallbacks for stats not stored in metric_scale.npz by the first sweep (its fixed settings).
 DEFAULT_ESTIMATOR = {"model": "depth-anything/DA3METRIC-LARGE", "n_frames_requested": 50,
@@ -65,6 +66,8 @@ def split_rel(rel):
 
 def find_clips(metric_root, countries):
     metric_root = Path(metric_root)
+    if not metric_root.is_dir():  # nothing estimated since the last cleanup
+        return defaultdict(list)
     by_session = defaultdict(list)
     for country_dir in sorted(p for p in metric_root.iterdir() if p.is_dir() and p.name != "logs"):
         if countries and country_dir.name not in countries:
@@ -221,17 +224,17 @@ def process_session(session, clips, traj_root, dry_run, force):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--metric_root", default=DEFAULT_METRIC_ROOT)
+    ap.add_argument("--work_dir", default=DEFAULT_WORK_DIR, help="Per-clip metric_scale.npz files made by estimate_metric_scale.py")
     ap.add_argument("--traj_root", default=DEFAULT_TRAJ_ROOT)
     ap.add_argument("--countries", nargs="*", default=None)
-    ap.add_argument("--log_dir", default=None, help="Where integration_log*.jsonl goes (default: --metric_root)")
+    ap.add_argument("--pipeline_dir", default=DEFAULT_PIPELINE_DIR, help="Where integration_log*.jsonl goes")
     ap.add_argument("--limit_sessions", type=int, default=None)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--force", action="store_true", help="Redo clips that already have metric_scale")
     args = ap.parse_args()
 
-    by_session = find_clips(args.metric_root, set(args.countries) if args.countries else None)
+    by_session = find_clips(args.work_dir, set(args.countries) if args.countries else None)
     sessions = sorted(by_session)[:args.limit_sessions]
     print(f"{sum(len(by_session[s]) for s in sessions)} clips in {len(sessions)} sessions"
           f"{' (DRY RUN)' if args.dry_run else ''}", flush=True)
@@ -239,7 +242,7 @@ def main():
     counts = defaultdict(int)
     skipped = defaultdict(int)
     n_updated = n_transferred = 0
-    log_path = Path(args.log_dir or args.metric_root) / ("integration_log_dryrun.jsonl" if args.dry_run else "integration_log.jsonl")
+    log_path = Path(args.pipeline_dir) / ("integration_log_dryrun.jsonl" if args.dry_run else "integration_log.jsonl")
     with ProcessPoolExecutor(args.workers) as pool, open(log_path, "a") as log:
         futs = [pool.submit(process_session, s, by_session[s], args.traj_root, args.dry_run, args.force)
                 for s in sessions]

@@ -12,7 +12,7 @@ disagreement says "one of them is wrong", not which.
             longer_than_gps, no_route_match): production depth scales are already in the manifest
 
 Inputs (in $QC_VALIDATION_DIR): clip_list.txt (dataset-relative .mp4 + TAB + stratum label) and metric/<clip>/metric_scale.npz,
-made with:  scripts/estimate_metric_scale.py --clip_list clip_list.txt --out_root $QC_VALIDATION_DIR/metric
+made with:  scripts/estimate_metric_scale.py --clip_list clip_list.txt --pipeline_dir $QC_VALIDATION_DIR/records --work_dir $QC_VALIDATION_DIR/metric
 Outputs (same dir): summary.csv, summary.txt, fig_strip.png, fig_gallery_*.png
 """
 import io
@@ -147,7 +147,7 @@ QC = {}
 
 def main():
     import pandas as pd
-    qc = pd.read_csv("/capstor/store/cscs/swissai/ab036/dbrggema/natix_metric_scale/clip_qc.csv")
+    qc = pd.read_csv("/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/_pipeline/clip_qc.csv")
     QC.update({r["clip"]: r for r in qc.to_dict("records")})
     # ---- passed sample (standalone depth scales) ----
     lab = dict(line.rstrip("\n").split("\t") for line in open(E / "clip_list.txt"))
@@ -198,7 +198,7 @@ def main():
     lo, hi = wilson(k, n)
     # false-negative extrapolation uses the sample drawn from the CURRENT unflagged use_fused pool ("random2" if
     # present, else the legacy "random" stratum, drawn before the needs_scale_check tier existed)
-    qc = pd.read_csv("/capstor/store/cscs/swissai/ab036/dbrggema/natix_metric_scale/clip_qc.csv", usecols=["route"])
+    qc = pd.read_csv("/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/_pipeline/clip_qc.csv", usecols=["route"])
     NP = int((qc.route == "use_fused").sum())
     P(f"   robust sigma of log(depth/GPS) in that sample: {np.median(np.abs(np.log(rnd.r) - np.median(np.log(rnd.r)))) * 1.4826:.3f}; median r {rnd.r.median():.3f}")
     P(f"\nFALSE NEGATIVES (passed, depth clearly disagrees) -- random sample of the unflagged use_fused pool: {k}/{n} = {100*k/max(n,1):.1f}% "

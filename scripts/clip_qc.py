@@ -245,7 +245,7 @@ def process_zip(zip_path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", required=True, help="Output CSV, one row per clip")
+    ap.add_argument("--out", default=str(TRAJ_ROOT / "_pipeline" / "clip_qc.csv"), help="Output CSV, one row per clip")
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--limit_zips", type=int, default=None, help="testing")
     ap.add_argument("--config_only", action="store_true",

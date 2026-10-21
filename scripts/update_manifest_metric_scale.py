@@ -68,8 +68,9 @@ import numpy as np
 
 TRAJ_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"
 DATASET_ROOT = "/capstor/store/cscs/swissai/ab036/datasets/natix/"
-METRIC_MANIFEST = "/capstor/store/cscs/swissai/ab036/dbrggema/natix_metric_scale/manifest_metric_scale.jsonl"
-INTEGRATION_LOG = "/capstor/store/cscs/swissai/ab036/dbrggema/natix_metric_scale/integration_log.jsonl"
+PIPELINE_DIR = f"{TRAJ_ROOT}/_pipeline"  # durable records of the pipeline (qc csv, depth-step manifest, integration log, logs, backups)
+METRIC_MANIFEST = f"{PIPELINE_DIR}/manifest_metric_scale.jsonl"
+INTEGRATION_LOG = f"{PIPELINE_DIR}/integration_log.jsonl"
 FUSED_STATUSES = {"ok", "no_route_match"}
 
 
@@ -134,13 +135,13 @@ def load_qc(path):
             return v == "True"
         if k == "n_keyframes":
             return int(float(v))
-        if k in ("slam_valid_until_s", "gps_extent_m", "fused_over_gps_len"):
+        if k in ("slam_valid_until_s", "gps_extent_m", "fused_over_gps_len", "fused_max_window_mps", "slam_max_step_ratio"):
             f = float(v)
             return None if math.isnan(f) else f
         return v
 
     keys = ("route", "slam_ok", "slam_reason", "n_keyframes", "slam_valid_until_s", "scale_ok", "scale_reason",
-            "gps_extent_m", "fused_over_gps_len")
+            "gps_extent_m", "fused_over_gps_len", "fused_max_window_mps", "slam_max_step_ratio")
     qc = {}
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
@@ -265,7 +266,7 @@ def main():
     ap.add_argument("--metric_manifest", default=METRIC_MANIFEST)
     ap.add_argument("--integration_log", default=INTEGRATION_LOG,
                     help="integrate_metric_scale.py's log; clips it skipped as 'mismatch' get no metric scale")
-    ap.add_argument("--qc_csv", default=None, help="clip_qc.py output: adds a `qc` entry to each row")
+    ap.add_argument("--qc_csv", default=f"{PIPELINE_DIR}/clip_qc.csv", help="clip_qc.py output: adds a `qc` entry to each row")
     ap.add_argument("--out", default=None, help="Write here instead of rewriting --manifest in place")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--limit_sessions", type=int, default=None, help="Testing: only compute GPS scales for the first N sessions (others get scale null)")

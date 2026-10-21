@@ -13,18 +13,19 @@ Clips whose gps_fusion status in the trajectory manifest is not "ok" have no `fu
   4. compares that metric depth with the SLAM point cloud projected into the same frame (z-depth,
      nearest point per pixel, sky/hood/far pixels masked): scale = median(metric / slam).
 
-Output per clip: <out_root>/<same relative path as the video, no .mp4>/metric_scale.npz with
+Output per clip (transient work files, --work_dir): <work_dir>/<same relative path as the video, no .mp4>/metric_scale.npz with
 frame_ids, slam_poses and metric_poses (= slam_poses with the translation multiplied by scale; the
 rerun's own poses, which are the ones the scale belongs to -- they can differ slightly from the
 original result.npz), scale, per-frame scales and quality stats. Already-done clips are skipped,
-so an interrupted run can simply be rerun. One line per clip goes to <out_root>/manifest_metric_scale.jsonl.
+so an interrupted run can simply be rerun. One line per clip goes to <pipeline_dir>/manifest_metric_scale.jsonl
+(the durable record; the work files only feed integrate_metric_scale.py and can be deleted afterwards).
 
 Validated on 5 clips with GPS: metric-depth scale within about +-8% of the GPS-derived scale
 (no systematic bias). Treat scale as ~+-10% accurate.
 
 Run inside the container, e.g.:
     srun --environment=vggtslam_env python3 scripts/estimate_metric_scale.py \\
-        --out_root /path/to/metric_scale_out --num_gpus 4 --workers_per_gpu 2
+        --qc_csv <pipeline_dir>/clip_qc.csv --num_gpus 4 --workers_per_gpu 2
 Needs dino_salad.ckpt + the DINOv2 hub repo in torch.hub's cache (same as batch_infer.py) and the
 DA3METRIC-LARGE weights (HF_HOME, or network access to download them).
 """
@@ -52,6 +53,8 @@ sys.path.insert(0, str(REPO_DIR))
 sys.path.insert(0, str(REPO_DIR / "scripts"))
 
 DEFAULT_TRAJ_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"
+DEFAULT_PIPELINE_DIR = f"{DEFAULT_TRAJ_ROOT}/_pipeline"  # durable records: qc csv, depth-step manifest, integration log
+DEFAULT_WORK_DIR = os.path.join(os.environ.get("SCRATCH", "/tmp"), "natix_metric_scale_work")  # transient per-clip files
 DEFAULT_DATASET_ROOT = "/capstor/store/cscs/swissai/ab036/datasets/natix"
 MANIFEST_NAME = "manifest_metric_scale.jsonl"
 MIN_FRAMES_USED = 1
@@ -95,13 +98,13 @@ def candidate_clips(args):
                 yield r["clip_id"], status
 
 
-def integration_state(out_root, dataset_root):
+def integration_state(pipeline_dir, dataset_root):
     """(integrated, refused) clip_id sets from integrate_metric_scale.py's append-only log, latest record per clip
     winning. integrated = merged into the clip's result.npz; refused = the SLAM rerun did not reproduce the stored
     poses (re-estimating would be refused again). Lets this script skip finished clips without the per-clip
     metric_scale.npz files, which can be archived once integrated."""
     integrated, refused = set(), set()
-    log = Path(out_root) / "integration_log.jsonl"
+    log = Path(pipeline_dir) / "integration_log.jsonl"
     if log.exists():
         with open(log) as f:
             for line in f:
@@ -119,16 +122,16 @@ def select_clips(args):
     dataset_root = Path(args.dataset_root)
     statuses = set(args.statuses) if args.statuses else None
     countries = set(args.countries) if args.countries else None
-    out_root = Path(args.out_root)
+    pipeline_dir, work_dir = Path(args.pipeline_dir), Path(args.work_dir)
     # Clips that already failed once (e.g. too few usable frames) are not retried automatically:
     # they never get a metric_scale.npz, so without this every rerun / sbatch resubmission would
     # redo them forever. --retry_failed overrides.
     failed = set()
-    prev_manifest = out_root / MANIFEST_NAME
+    prev_manifest = pipeline_dir / MANIFEST_NAME
     if prev_manifest.exists() and not args.retry_failed:
         with open(prev_manifest) as f:
             failed = {json.loads(l)["clip_id"] for l in f if l.strip() and not json.loads(l).get("ok")}
-    integrated, refused = integration_state(out_root, dataset_root)
+    integrated, refused = integration_state(pipeline_dir, dataset_root)
     if not args.retry_failed:
         failed |= refused
     clips = []
@@ -141,7 +144,7 @@ def select_clips(args):
             continue
         if args.num_shards > 1 and zlib.crc32(str(rel).encode()) % args.num_shards != args.shard:
             continue
-        if not args.force and (out_root / rel.with_suffix("") / "metric_scale.npz").exists():
+        if not args.force and (work_dir / rel.with_suffix("") / "metric_scale.npz").exists():
             continue  # (also skipped via the QC csv's has_metric_scale and the integration log, see candidate_clips)
         if statuses is not None and status not in statuses:
             continue
@@ -293,7 +296,7 @@ def worker(gpu_id, cfg, job_q, res_q):
                          pcd_stride=cfg["pcd_stride"], process_res=504)
             metric_poses = slam_poses.copy()
             metric_poses[:, :3, 3] *= stats["scale"]
-            final_dir = Path(cfg["out_root"]) / job["rel"]
+            final_dir = Path(cfg["work_dir"]) / job["rel"]
             final_dir.mkdir(parents=True, exist_ok=True)
             tmp = final_dir / f".metric_scale.{os.getpid()}.npz"
             np.savez(tmp, frame_ids=frame_ids, slam_poses=slam_poses, metric_poses=metric_poses,
@@ -312,10 +315,14 @@ def worker(gpu_id, cfg, job_q, res_q):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out_root", required=True, help="Where per-clip metric_scale.npz files go")
+    ap.add_argument("--pipeline_dir", default=DEFAULT_PIPELINE_DIR,
+                    help="Durable records: manifest_metric_scale.jsonl (written), integration_log.jsonl (read), clip_qc.csv")
+    ap.add_argument("--work_dir", default=DEFAULT_WORK_DIR,
+                    help="Transient per-clip metric_scale.npz files (rerun poses, per-frame scales) that integrate_metric_scale.py "
+                         "merges into result.npz; default $SCRATCH/natix_metric_scale_work; safe to delete once integrated")
     ap.add_argument("--clip_list", default=None,
                     help="Process exactly these clips (dataset-relative .mp4 paths, optional TAB label per "
-                         "line) instead of the QC/manifest selection. Use a separate --out_root for such "
+                         "line) instead of the QC/manifest selection. Use a separate --pipeline_dir and --work_dir for such "
                          "spot checks so they are not mixed into the production outputs.")
     ap.add_argument("--qc_csv", default=None,
                     help="scripts/clip_qc.py output: process the clips it routed to needs_metric_scale "
@@ -349,7 +356,8 @@ def main():
     print(f"{len(clips)} clips to process", flush=True)
     if not clips:
         return
-    Path(args.out_root).mkdir(parents=True, exist_ok=True)
+    Path(args.pipeline_dir).mkdir(parents=True, exist_ok=True)
+    Path(args.work_dir).mkdir(parents=True, exist_ok=True)
 
     import multiprocessing as mp
     ctx = mp.get_context("spawn")
@@ -368,7 +376,7 @@ def main():
 
     done = n_ok = 0
     crashed = False
-    with open(Path(args.out_root) / MANIFEST_NAME, "a") as mf:
+    with open(Path(args.pipeline_dir) / MANIFEST_NAME, "a") as mf:
         while done < len(clips):
             try:
                 res = res_q.get(timeout=10)
@@ -389,7 +397,7 @@ def main():
                 print(res["error"], file=sys.stderr, flush=True)
     for w in workers:
         w.join(timeout=30)
-    print(f"Done. {n_ok}/{done} succeeded. Manifest: {Path(args.out_root) / MANIFEST_NAME}")
+    print(f"Done. {n_ok}/{done} succeeded. Manifest: {Path(args.pipeline_dir) / MANIFEST_NAME}")
     if crashed:
         sys.exit(1)  # non-zero so run_metric_scale.sbatch resubmits instead of treating this as finished
 
