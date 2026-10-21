@@ -70,16 +70,21 @@ Stages 2-5 are `scripts/run_metric_scale.sbatch`. QC routes (`scripts/clip_qc.py
 
 | `pose_source` | use | clips (2026-10-20) | `pose_source_reason` |
 |---|---|---|---|
-| `fused` | `fused_poses` (GPS/road-fused, metric) | 109,137 (90.9%) | `gps_fusion` 105,063; after a cross-check: `gps_confirmed_by_depth` 2,334, `gps_unchecked` 1,170, `gps_ambiguous_vs_depth` 570 |
+| `fused` | `fused_poses` (GPS/road-fused, metric) | 109,230 (91.0%) | `gps_fusion` 105,063; after a cross-check: `gps_confirmed_by_depth` 3,161, `gps_ambiguous_vs_depth` 862, `gps_length_supports_fused` 112, `gps_unchecked` 32 |
 | `metric` | `metric_poses` (SLAM poses scaled by a depth-based estimate) | 9,016 (7.5%) | why GPS wasn't used: `no_fused_poses` 8,681, `implausible_speed` 217, `longer_than_gps` 68, `no_route_match` 50 |
 | `static` | nothing to use: ~stationary | 998 (0.8%) | `stationary` |
-| `none` | nothing usable | 868 (0.7%) | `scale_contradicted` 421, `slam_jump` 217, `too_few_keyframes` 208 (moved, or no GPS to verify), `no_calibration` 18, `rerun_poses_mismatch` 4 |
+| `none` | nothing usable | 775 (0.6%) | `scale_contradicted` 328, `slam_jump` 217, `too_few_keyframes` 208 (moved, or no GPS to verify), `no_calibration` 18, `rerun_poses_mismatch` 4 |
 
 The cross-check (`scale_check` in the manifest: `depth_scale`, `ratio` = depth/GPS, `verdict`): `confirmed`
 (ratio 0.8-1.25), `ambiguous` (0.67-0.8 or 1.25-1.5), `contradicted` (outside 0.67-1.5), `unavailable`
-(no depth scale, or one too weak to contradict: < 5 frames or `scale_rel_iqr` > 0.25). Clips stay `fused`
-unless contradicted. For a contradicted clip we cannot tell which estimate is wrong (in a spot check the
-depth scale was sometimes the wrong one), so neither is trusted: `pose_source` is `none`.
+(no depth scale, or < 5 frames). `scale_check.confidence` is `high` when the per-frame depth estimates are
+consistent (`scale_rel_iqr` <= 0.25); then the verdict uses the median ratio. For noisy (`low`) estimates a clip is
+contradicted only if the whole interquartile range of its per-frame scales lies outside 0.67-1.5. Clips stay
+`fused` unless contradicted. For a contradicted clip we cannot tell which estimate is wrong (in a spot check the
+depth scale was sometimes the wrong one), so neither is trusted: `pose_source` is `none` -- with one exception:
+for a clip flagged only for its map-matching error, the raw GPS track length already agrees with the fused scale
+(fused/GPS length 0.8-1.25), so GPS fit and GPS length outvote the depth scale: `fused`,
+`gps_length_supports_fused` (112 clips; a judgement, not validated).
 
 Things to know:
 
@@ -88,8 +93,9 @@ Things to know:
   evidence) and `scale_rel_iqr` (spread of the per-frame estimates; ~11% of clips are above 0.25).
 - **`gps_fusion.status == "ok"` does not guarantee a good scale** -- that is what the QC checks and the
   cross-check are for. Of the 4,495 cross-checked clips, 50% were confirmed by the depth scale, 17-21% were
-  contradicted for the length-ratio triggers but only 4% for the map-matching trigger (102 of 2,843), and
-  ~25% had no usable depth scale (`scale_rel_iqr` > 0.25 or no calibration). Measured error rate of the
+  contradicted for the length-ratio triggers but only 4% for the map-matching trigger (102 of 2,843, all of
+  which were then overruled by the GPS track length); noisy depth estimates (about a quarter) are judged on their
+  interquartile range and only 32 clips remain unverifiable. Measured error rate of the
   unflagged clips: see [QC validation](#qc-validation-how-good-is-the-qc).
 - **`none` / `slam_jump`:** `qc.slam_valid_until_s` is the time of the last keyframe before the
   first jump, i.e. a clean prefix if you want to truncate (not validated).
@@ -142,8 +148,8 @@ truth. A disagreement does not say which estimate is wrong; in some clips it was
   50 m. The fused path at the *same time* as a fix is > 50 m off in 42 clips, but those lie 5 m from the path:
   an implied GPS-vs-video time offset of a median 3 s (p90 9 s) in ~3% of clips. Not a pose error, but beware
   when using GPS timestamps.
-- **Limits:** one sample, one pool, depth scale +-8-10%; 26% of cross-checked clips could not be verified
-  (noisy depth); `static` and `too_few_keyframes` clips were checked against GPS extent only, not against depth.
+- **Limits:** one sample, one pool, depth scale +-8-10%; the rates above were measured on confident depth
+  estimates only (9% of the sample had noisy ones and are not covered); `static` and `too_few_keyframes` clips were checked against GPS extent only, not against depth.
 
 Reproduce: the clip lists and per-clip depth scores are in that folder (`clip_list.txt`, `metric_scores.tar.gz` -> extract to
 `$QC_VALIDATION_DIR/metric`; made with `scripts/estimate_metric_scale.py --clip_list ... --out_root $QC_VALIDATION_DIR/metric`), then

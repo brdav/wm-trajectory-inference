@@ -24,7 +24,11 @@ says, per clip, where its metric scale comes from and how good it is:
 Clips clip_qc.py routed to needs_scale_check (fused_poses pass but are near a limit or
 unverifiable) additionally get `scale_check` {depth_scale, ratio = depth/GPS, verdict, n_frames_used,
 scale_rel_iqr}: confirmed (ratio 0.8-1.25), ambiguous, contradicted (outside 0.67-1.5) or unavailable.
-They keep `fused` unless contradicted; then `metric_scale.source` is null and pose_source none.
+They keep `fused` unless contradicted; then `metric_scale.source` is null and pose_source none. Exception: a
+contradiction on a clip flagged only for its map-matching error is overruled when the raw GPS track length
+agrees with the fused scale (`scale_check.adjudication` = gps_length_supports_fused; pose_source fused).
+`scale_check.confidence` is "low" for noisy depth estimates (scale_rel_iqr > 0.25), which are judged on their
+whole interquartile range instead of the median (see scale_check()).
 
 With --qc_csv every row also gets `pose_source` (fused / metric / none) and `pose_source_reason`:
 the single field downstream consumers should branch on (see pose_source() below).
@@ -130,13 +134,13 @@ def load_qc(path):
             return v == "True"
         if k == "n_keyframes":
             return int(float(v))
-        if k in ("slam_valid_until_s", "gps_extent_m"):
+        if k in ("slam_valid_until_s", "gps_extent_m", "fused_over_gps_len"):
             f = float(v)
             return None if math.isnan(f) else f
         return v
 
     keys = ("route", "slam_ok", "slam_reason", "n_keyframes", "slam_valid_until_s", "scale_ok", "scale_reason",
-            "gps_extent_m")
+            "gps_extent_m", "fused_over_gps_len")
     qc = {}
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
@@ -163,6 +167,7 @@ def integration_status(log_path):
     return status
 
 
+SCALE_CHECK_LOW, SCALE_CHECK_HIGH = 0.8, 1.25  # clip_qc.py's fused/GPS path-length band (see adjudicate())
 AGREE = (0.8, 1.25)        # depth/GPS scale ratio counted as agreement (depth scale is only ~+-10%)
 CLEAR = (1 / 1.5, 1.5)     # outside this: the two estimates clearly contradict each other
 CONFIDENT_MIN_FRAMES, CONFIDENT_MAX_REL_IQR = 5, 0.25  # a depth scale weaker than this cannot contradict
@@ -172,17 +177,43 @@ def scale_check(gps, m, state):
     """Cross-check of a GPS-fused scale (clip_qc route needs_scale_check) against the depth-based one.
     m = that clip's estimate_metric_scale manifest record, state = its integration status.
     verdict: confirmed (ratio in AGREE) | ambiguous | contradicted (ratio outside CLEAR) |
-             unavailable (no/failed/mismatched/low-confidence depth scale: GPS scale stays unchecked)."""
-    out = {"depth_scale": None, "ratio": None, "verdict": "unavailable", "n_frames_used": None, "scale_rel_iqr": None}
+             unavailable (no/failed/mismatched depth scale, or fewer than CONFIDENT_MIN_FRAMES frames).
+    confidence: "high" when the per-frame depth estimates are consistent (scale_rel_iqr <=
+    CONFIDENT_MAX_REL_IQR): the verdict is judged on the median ratio. "low" (noisy estimates): a clip can
+    only be contradicted if the WHOLE interquartile range of its per-frame scales lies outside CLEAR on one
+    side; "confirmed" needs the median in AGREE; anything else is ambiguous. So noisy depth can no longer
+    block a verdict, but it cannot condemn a clip on a single unlucky median either."""
+    out = {"depth_scale": None, "ratio": None, "verdict": "unavailable", "confidence": None,
+           "n_frames_used": None, "scale_rel_iqr": None}
     if gps is None or m is None or not m.get("ok") or (state or {}).get("state") == "mismatch":
         return out
-    depth = (((state or {}).get("transferred")) or {}).get("scale", m["scale"])
+    tr = (state or {}).get("transferred") or {}
+    depth, p25, p75 = tr.get("scale", m["scale"]), tr.get("scale_p25", m["scale_p25"]), tr.get("scale_p75", m["scale_p75"])
     out.update(depth_scale=depth, ratio=depth / gps, n_frames_used=m["n_frames_used"], scale_rel_iqr=m["scale_rel_iqr"])
-    if m["n_frames_used"] < CONFIDENT_MIN_FRAMES or m["scale_rel_iqr"] > CONFIDENT_MAX_REL_IQR:
+    if m["n_frames_used"] < CONFIDENT_MIN_FRAMES:
         return out
     r = out["ratio"]
-    out["verdict"] = "confirmed" if AGREE[0] <= r <= AGREE[1] else "contradicted" if not (CLEAR[0] <= r <= CLEAR[1]) else "ambiguous"
+    if m["scale_rel_iqr"] <= CONFIDENT_MAX_REL_IQR:
+        out["confidence"] = "high"
+        out["verdict"] = "confirmed" if AGREE[0] <= r <= AGREE[1] else "contradicted" if not (CLEAR[0] <= r <= CLEAR[1]) else "ambiguous"
+    else:
+        out["confidence"] = "low"
+        lo, hi = p25 / gps, p75 / gps
+        out["verdict"] = ("contradicted" if hi < CLEAR[0] or lo > CLEAR[1] else
+                          "confirmed" if AGREE[0] <= r <= AGREE[1] else "ambiguous")
     return out
+
+
+def adjudicate(chk, q):
+    """A contradicted cross-check on a clip that was only flagged for its map-matching error already passed the
+    length-ratio checks: the fused path is 0.8-1.25x the raw GPS track length, an estimate that does not
+    depend on depth. GPS fit and GPS track length agree against the depth scale (2 vs 1): keep the GPS scale.
+    Returns the adjudication tag or None."""
+    ratio = q.get("fused_over_gps_len")
+    if (chk["verdict"] == "contradicted" and q.get("scale_reason") == "map_match_error_high"
+            and ratio is not None and SCALE_CHECK_LOW <= ratio <= SCALE_CHECK_HIGH):
+        return "gps_length_supports_fused"
+    return None
 
 
 def pose_source(r):
@@ -204,6 +235,8 @@ def pose_source(r):
     if q["route"] == "needs_scale_check":
         v = (r.get("scale_check") or {}).get("verdict")
         if v == "contradicted":
+            if (r.get("scale_check") or {}).get("adjudication") == "gps_length_supports_fused":
+                return "fused", "gps_length_supports_fused"
             return "none", "scale_contradicted"
         return "fused", {"confirmed": "gps_confirmed_by_depth", "ambiguous": "gps_ambiguous_vs_depth"}.get(v, "gps_unchecked")
     if q["route"] == "needs_metric_scale":
@@ -275,8 +308,11 @@ def main():
         if route == "needs_scale_check":
             gps = gps_scale.get(cid)
             r["scale_check"] = chk = scale_check(gps, metric.get(cid), integ.get(cid))
+            adj = adjudicate(chk, qc.get(cid) or {})
+            if adj:
+                chk["adjudication"] = adj
             entry = ({"source": "gps_fusion", "scale": gps} if gps is not None else {"source": None, "scale": None})
-            if chk["verdict"] == "contradicted":
+            if chk["verdict"] == "contradicted" and not adj:
                 entry = {"source": None, "scale": None, "status": "scale_contradicted", "reason": "scale_contradicted",
                          "gps_fusion_scale": gps, "depth_scale": chk["depth_scale"]}
         elif cid in mismatched:
@@ -341,7 +377,12 @@ def main():
                    depth_scale=dict(script="scripts/estimate_metric_scale.py", model="depth-anything/DA3METRIC-LARGE",
                                     n_frames_requested=50, pcd_stride=3, process_res=504,
                                     agree_band=AGREE, contradicted_outside=CLEAR,
-                                    confident_if=dict(min_frames=CONFIDENT_MIN_FRAMES, max_rel_iqr=CONFIDENT_MAX_REL_IQR)),
+                                    confident_if=dict(min_frames=CONFIDENT_MIN_FRAMES, max_rel_iqr=CONFIDENT_MAX_REL_IQR),
+                                    verdict_rules=dict(
+                                        high_confidence="judged on the median depth/GPS ratio",
+                                        low_confidence="contradicted only if the whole IQR of per-frame scales is outside the clear band; confirmed if the median is in the agree band; else ambiguous",
+                                        adjudication="a contradiction on a map_match_error_high clip is overruled when fused/GPS path length is within "
+                                                     f"[{SCALE_CHECK_LOW}, {SCALE_CHECK_HIGH}] (pose_source fused, reason gps_length_supports_fused)")),
                    pose_source_counts=dict(Counter(r["pose_source"] for r in rows if "pose_source" in r)),
                    metric_scale_source_counts=dict(summary),
                    manifest_script_git_commit=git("rev-parse", "HEAD"),
