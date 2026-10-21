@@ -137,7 +137,7 @@ Stages 2-5 are `scripts/run_metric_scale.sbatch`. QC routes (`scripts/clip_qc.py
 |---|---|---|---|
 | `fused` | `fused_poses` (GPS/road-fused, metric) | 109,230 (91.0%) | `gps_fusion` 105,063; after a cross-check: `gps_confirmed_by_depth` 3,161, `gps_ambiguous_vs_depth` 862, `gps_length_supports_fused` 112, `gps_unchecked` 32 |
 | `metric` | `metric_poses` (SLAM poses scaled by a depth-based estimate) | 9,016 (7.5%) | why GPS wasn't used: `no_fused_poses` 8,681, `implausible_speed` 217, `longer_than_gps` 68, `no_route_match` 50 |
-| `static` | nothing to use: ~stationary | 998 (0.8%) | `stationary` |
+| `static` | nothing to use: ~stationary | 996 (0.8%) | `stationary` |
 | `none` | nothing usable | 784 (0.7%) | `scale_contradicted` 328, `slam_jump` 226, `too_few_keyframes` 208 (moved, or no GPS to verify), `no_calibration` 18, `rerun_poses_mismatch` 4 |
 
 The cross-check (`scale_check` in the manifest: `depth_scale`, `ratio` = depth/GPS, `verdict`): `confirmed`
@@ -164,10 +164,10 @@ before the schema were repaired by `scripts/backfill_manifest.py`.
 | `ok` | `batch_infer.py` finished the clip. `false` + `error`/`stage` otherwise (null when `ok`) |
 | `seconds` | wall time of the clip's run (null for backfilled rows) |
 | `fixed_intrinsics` | the camera calibration of `FIXED_METADATA.json` was used (otherwise self-calibrated) |
-| `fixed_intrinsics_inferred` | `true` for the 47,199 rows whose `fixed_intrinsics` was backfilled rather than recorded (about 99.4% agreement with the recorded value on rows that have both; the recorded value was `false` for ~0.6% of calibrated clips, so an inferred `true` can be wrong for a few hundred rows) |
+| `fixed_intrinsics_inferred` | `true` for the 47,197 rows whose `fixed_intrinsics` was backfilled rather than recorded (about 99.4% agreement with the recorded value on rows that have both; the recorded value was `false` for ~0.6% of calibrated clips, so an inferred `true` can be wrong for a few hundred rows) |
 | `gps_fusion` | `status`, `error`, `region_used`, `used_fallback`, `network_profile_used`, `matched_keyframes`, `total_keyframes`, `map_match_error_mean_m`, `map_match_error_max_m`, `map_match_error_n_points`; the last eight are null unless the fusion produced a placement |
 | `qc` | `route`, `slam_ok`, `slam_reason`, `n_keyframes`, `slam_valid_until_s`, `scale_ok`, `scale_reason`, `gps_extent_m`, `fused_over_gps_len`, `fused_max_window_mps`, `slam_max_step_ratio`, `version` (null where a metric does not apply, e.g. `slam_valid_until_s` unless SLAM broke) |
-| `metric_scale` | `source` (`gps_fusion` / `metric_depth` / null), `scale`, then source-specific: `scale_p25`, `scale_p75`, `scale_rel_iqr`, `n_frames_used`, `model`, `scale_transferred`, `transfer_residual` (depth scale); `gps_fusion_scale` / `depth_scale` (when both exist); `status`, `reason`, `error` (no usable scale) |
+| `metric_scale` | `source` (`gps_fusion` / `metric_depth` / null), `scale`, then source-specific: `scale_p25`, `scale_p75`, `scale_rel_iqr`, `n_frames_used`, `model`, `scale_transferred`, `transfer_residual` (depth scale); `gps_fusion_scale` / `depth_scale` (when both exist); `status` (`failed`, `scale_contradicted`, `not_attempted`), `reason`, `error` (no usable scale) |
 | `scale_check` | `depth_scale`, `ratio`, `verdict`, `confidence`, `n_frames_used`, `scale_rel_iqr`, `adjudication`; all null unless `qc.route == "needs_scale_check"` |
 | `pose_source`, `pose_source_reason` | which poses to use, and why (table above) |
 
@@ -197,8 +197,8 @@ Things to know:
 - **`static` clips** have `slam_poses` from < 4 keyframes: treat the trajectory as stationary rather than
   reading motion from it (`qc.gps_extent_m` is the raw GPS span).
 - 9 clips (all `slam_jump`) had a `result.npz` but no record from the original run, probably a crashed worker; they got a row
-  with `ok: false`, `stage: "backfilled"`. 2 rows belong to clips that are not in the sample manifest (left over from an
-  earlier dataset listing).
+  with `ok: false`, `stage: "backfilled"` and `metric_scale.status: "not_attempted"`. The manifest has exactly one row per
+  source video of the sample manifest (120,026).
 
 ```python
 import json
