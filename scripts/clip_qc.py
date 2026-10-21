@@ -243,6 +243,7 @@ def process_zip(zip_path):
 
 
 def main():
+    global TRAJ_ROOT  # --traj_root overrides the module default; must be declared before TRAJ_ROOT is used below
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--traj_root", default=str(TRAJ_ROOT), help="Trajectories root holding the session zips (default: the natix output)")
@@ -256,8 +257,7 @@ def main():
     if args.config_only:
         print(json.dumps(write_config(args.out), indent=2))
         return
-    global TRAJ_ROOT
-    TRAJ_ROOT = Path(args.traj_root)  # set before the worker pool forks
+    TRAJ_ROOT = Path(args.traj_root)  # set before the worker pool forks (see the `global` at the top of main)
     zips = sorted(TRAJ_ROOT.rglob("*.zip"))[:args.limit_zips]
     print(f"{len(zips)} zips")
     rows = []
