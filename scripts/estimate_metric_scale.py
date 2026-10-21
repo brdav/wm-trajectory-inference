@@ -95,6 +95,26 @@ def candidate_clips(args):
                 yield r["clip_id"], status
 
 
+def integration_state(out_root, dataset_root):
+    """(integrated, refused) clip_id sets from integrate_metric_scale.py's append-only log, latest record per clip
+    winning. integrated = merged into the clip's result.npz; refused = the SLAM rerun did not reproduce the stored
+    poses (re-estimating would be refused again). Lets this script skip finished clips without the per-clip
+    metric_scale.npz files, which can be archived once integrated."""
+    integrated, refused = set(), set()
+    log = Path(out_root) / "integration_log.jsonl"
+    if log.exists():
+        with open(log) as f:
+            for line in f:
+                r = json.loads(line)
+                cid = lambda inner: f"{str(dataset_root).rstrip('/')}/{r['session']}/{inner[:-len('/result.npz')]}.mp4"
+                for inner, why in r.get("skipped", {}).items():
+                    if why == "mismatch":
+                        refused.add(cid(inner)); integrated.discard(cid(inner))
+                for inner in r.get("updated_inner", []):
+                    integrated.add(cid(inner)); refused.discard(cid(inner))
+    return integrated, refused
+
+
 def select_clips(args):
     dataset_root = Path(args.dataset_root)
     statuses = set(args.statuses) if args.statuses else None
@@ -108,9 +128,12 @@ def select_clips(args):
     if prev_manifest.exists() and not args.retry_failed:
         with open(prev_manifest) as f:
             failed = {json.loads(l)["clip_id"] for l in f if l.strip() and not json.loads(l).get("ok")}
+    integrated, refused = integration_state(out_root, dataset_root)
+    if not args.retry_failed:
+        failed |= refused
     clips = []
     for clip_id, status in candidate_clips(args):
-        if clip_id in failed:
+        if clip_id in failed or (clip_id in integrated and not args.force):
             continue
         video = Path(clip_id)
         rel = video.relative_to(dataset_root)
@@ -119,7 +142,7 @@ def select_clips(args):
         if args.num_shards > 1 and zlib.crc32(str(rel).encode()) % args.num_shards != args.shard:
             continue
         if not args.force and (out_root / rel.with_suffix("") / "metric_scale.npz").exists():
-            continue
+            continue  # (also skipped via the QC csv's has_metric_scale and the integration log, see candidate_clips)
         if statuses is not None and status not in statuses:
             continue
         clips.append({"video_path": str(video), "rel": str(rel.with_suffix("")), "status": status})

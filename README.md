@@ -164,6 +164,10 @@ Reproduce: the clip lists and per-clip depth scores are in that folder (`clip_li
   were transferred from a SLAM rerun, and which were refused; `manifest_metric_scale.jsonl` the depth step.
 - Replaced files are kept in `natix_metric_scale/backups/` (see its README.txt); every manifest rewrite now
   keeps a timestamped `manifest.jsonl.bak_<time>`.
+- The per-clip depth-scale files (`natix_metric_scale/<Country>/.../metric_scale.npz`: rerun poses and per-frame
+  scales) are redundant once integrated; they are archived in `backups/standalone_metric_scale_*.tar.gz` and the
+  estimator skips finished clips via the QC csv and `integration_log.jsonl`, so the trees can be deleted (the
+  sbatch archives them after a run and prints the removal command; it never deletes).
 
 ## Loading a clip's trajectory
 

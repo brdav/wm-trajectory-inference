@@ -109,6 +109,13 @@ if [ "$EXIT_CODE" -eq 0 ]; then
     echo "=== $(date -Iseconds) step 4: integrate_metric_scale.py"
     "$CPU_PY" "$REPO_DIR/scripts/integrate_metric_scale.py" --metric_root "$OUT_ROOT" --traj_root "$TRAJ_ROOT" --workers 24 \
         || { echo "integration had failures -- NOT updating the manifest" >&2; exit 1; }
+    # The per-clip metric_scale.npz files are redundant once integrated (the scale is in the clip's result.npz and
+    # the manifest) and cost ~5 inodes each. Archive them; deleting is left to a human on purpose.
+    PACK="$OUT_ROOT/backups/standalone_metric_scale_$(date +%Y%m%dT%H%M%S)"
+    ( cd "$OUT_ROOT" && find . -mindepth 1 -maxdepth 1 -type d ! -name backups ! -name logs ! -name qc_validation -printf '%P\n' > "$PACK.roots.txt" \
+        && [ -s "$PACK.roots.txt" ] && tar czf "$PACK.tar.gz" -T "$PACK.roots.txt" && gzip -t "$PACK.tar.gz" ) \
+        && echo "=== archived the per-clip score files to $PACK.tar.gz; once checked, free the inodes with: (cd $OUT_ROOT && xargs -d '\n' rm -rf -- < $PACK.roots.txt)" \
+        || echo "=== WARNING: could not archive the per-clip score files (nothing removed)" >&2
     echo "=== $(date -Iseconds) step 5: update_manifest_metric_scale.py"
     "$CPU_PY" "$REPO_DIR/scripts/update_manifest_metric_scale.py" --traj_root "$TRAJ_ROOT" --qc_csv "$QC_CSV" \
         --metric_manifest "$OUT_ROOT/manifest_metric_scale.jsonl" --integration_log "$OUT_ROOT/integration_log.jsonl" --workers 24
