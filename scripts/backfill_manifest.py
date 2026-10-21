@@ -12,7 +12,9 @@ video in the sample manifest; the existing manifest predates that. This script
      agree (>= 99%); otherwise it stops. The recorded value was False for ~0.6% of clips that do have usable
      calibration (transient fallbacks to self-calibration), so an inferred True can be wrong for a few hundred
      rows; every filled row is marked fixed_intrinsics_inferred = true,
-  3. adds a row for every sample-manifest video that has none (ok=false, stage="backfilled": the clip has a result
+  3. removes rows of videos that are not in the sample manifest (a leftover of an earlier dataset listing); the removed
+     rows are saved next to the manifest backups so nothing is lost,
+  4. adds a row for every sample-manifest video that has none (ok=false, stage="backfilled": the clip has a result
      in its session zip but the original run left no record, most likely a worker that died after saving the SLAM
      result),
 and writes the manifest in place after saving a timestamped backup next to it. Run
@@ -72,6 +74,8 @@ def main():
     ap.add_argument("--out", default=None, help="Write here instead of rewriting --manifest in place")
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--check_n", type=int, default=3000, help="Rows with a recorded fixed_intrinsics used to validate the method")
+    ap.add_argument("--removed_log", default=f"{DEFAULT_TRAJECTORY_ROOT}/_pipeline/backups/manifest_rows_removed_{time.strftime('%Y%m%d')}.jsonl",
+                    help="Where rows removed because their video is not in the sample manifest are saved")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
@@ -80,12 +84,15 @@ def main():
     n_dropped = sum(1 for r in rows if "gpu" in r or "pid" in r)
     rows = [{k: v for k, v in r.items() if k not in ("gpu", "pid")} for r in rows]
 
+    dataset_root = args.dataset_root.rstrip("/")
+    wanted = {f"{dataset_root}/{v}" for v in source_videos(args.sample_manifest)}
+    extra = [r for r in rows if r["clip_id"] not in wanted]
+    rows = [r for r in rows if r["clip_id"] in wanted]
     missing = [r for r in rows if r.get("fixed_intrinsics") is None]
     have = [r for r in rows if isinstance(r.get("fixed_intrinsics"), bool)]
     random.seed(0)
     check = random.sample(have, min(args.check_n, len(have)))
     have_ids = {r["clip_id"] for r in rows}
-    dataset_root = args.dataset_root.rstrip("/")
     new_videos = [v for v in source_videos(args.sample_manifest) if f"{dataset_root}/{v}" not in have_ids]
     todo = [r["clip_id"] for r in missing] + [r["clip_id"] for r in check] + [f"{dataset_root}/{v}" for v in new_videos]
     print(f"gpu/pid on {n_dropped} rows; fixed_intrinsics missing on {len(missing)}; validating the method on "
@@ -111,12 +118,19 @@ def main():
                      "fixed_intrinsics_inferred": True, "stage": "backfilled",
                      "error": "no record in the original run's manifest (the clip has a result in its session zip; the "
                               "worker most likely died after saving the SLAM result); row added by scripts/backfill_manifest.py"})
-    print(f"filled fixed_intrinsics on {len(missing)} rows "
+    print(f"removed {len(extra)} rows of videos that are not in the sample manifest; "
+          f"filled fixed_intrinsics on {len(missing)} rows "
           f"(calibrated: {sum(bool(r['fixed_intrinsics']) for r in missing)}, not: {sum(not r['fixed_intrinsics'] for r in missing)}); "
           f"added {len(new_videos)} rows -> {len(rows)} rows", flush=True)
     if args.dry_run:
         return
 
+    if extra:
+        Path(args.removed_log).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.removed_log, "a") as f:
+            for r in extra:
+                f.write(json.dumps(r) + "\n")
+        print(f"removed rows saved to {args.removed_log}")
     out_path = Path(args.out or args.manifest)
     if args.out is None:
         bak = Path(f"{args.manifest}.bak_{time.strftime('%Y%m%dT%H%M%S')}")

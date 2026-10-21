@@ -375,7 +375,9 @@ def main():
         elif cid in gps_scale and gps_scale[cid] is not None:
             entry = {"source": "gps_fusion", "scale": gps_scale[cid]}
         else:
-            entry = {"source": None, "scale": None}
+            # no GPS-fused scale and never sent to the depth step (e.g. SLAM failed): say so explicitly
+            entry = {"source": None, "scale": None, "status": "not_attempted",
+                     "reason": (qc.get(cid) or {}).get("route") or "no_scale_available"}
         if qc.get(cid) is not None:
             r["qc"] = dict(qc[cid], version=qc_cfg.get("qc_version"))
             if qc[cid]["route"] == "needs_metric_scale" and entry["source"] == "gps_fusion":
@@ -384,7 +386,8 @@ def main():
         r["metric_scale"] = entry
         if "qc" in r:
             r["pose_source"], r["pose_source_reason"] = pose_source(r)
-        summary[entry["source"] or ("failed" if entry.get("status") else "none")] += 1
+        summary[entry["source"] or ("not_attempted" if entry.get("status") == "not_attempted" else
+                                    "failed" if entry.get("status") else "none")] += 1
     rows = [normalize_row(r) for r in rows]
     print("metric_scale source counts:", dict(summary))
     if args.dry_run:
