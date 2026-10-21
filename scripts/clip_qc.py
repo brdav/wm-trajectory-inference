@@ -245,6 +245,7 @@ def process_zip(zip_path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--traj_root", default=str(TRAJ_ROOT), help="Trajectories root holding the session zips (default: the natix output)")
     ap.add_argument("--out", default=str(TRAJ_ROOT / "_pipeline" / "clip_qc.csv"), help="Output CSV, one row per clip")
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--limit_zips", type=int, default=None, help="testing")
@@ -255,6 +256,8 @@ def main():
     if args.config_only:
         print(json.dumps(write_config(args.out), indent=2))
         return
+    global TRAJ_ROOT
+    TRAJ_ROOT = Path(args.traj_root)  # set before the worker pool forks
     zips = sorted(TRAJ_ROOT.rglob("*.zip"))[:args.limit_zips]
     print(f"{len(zips)} zips")
     rows = []

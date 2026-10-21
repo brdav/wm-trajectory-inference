@@ -31,6 +31,10 @@
 # To test first on a handful of random clips, run the python line below by hand with
 # `--limit 8 --shuffle --pipeline_dir <somewhere else> --work_dir <somewhere else>` inside an allocation.
 #
+# To run the whole stage on another output folder (e.g. a scratch copy of a few clips), set TRAJ_ROOT (and WORK_DIR):
+#   sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,WORK_DIR=$SCRATCH/test_work scripts/run_metric_scale.sbatch
+# Every script it calls then reads and writes only under that folder (including its manifest.jsonl).
+#
 # Where things go: durable records (clip_qc.csv, manifest_metric_scale.jsonl, integration_log.jsonl, job logs, backups) in
 # $TRAJ_ROOT/_pipeline/; transient per-clip files in $WORK_DIR (default $SCRATCH/natix_metric_scale_work); the results
 # themselves in the session zips and $TRAJ_ROOT/manifest.jsonl. Nothing else is written.
@@ -46,7 +50,7 @@
 
 set -uo pipefail
 
-TRAJ_ROOT=/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories
+TRAJ_ROOT="${TRAJ_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories}"  # override to run on another output folder
 PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
 WORK_DIR="${WORK_DIR:-${SCRATCH:-/tmp}/natix_metric_scale_work}"
 REPO_DIR=/users/dbrggema/wm_trajectory_inference
@@ -87,12 +91,12 @@ resubmit_or_stop() {
 
 trap 'echo "=== $(date -Iseconds) job $SLURM_JOB_ID: caught SIGUSR1, walltime approaching -- resubmitting before hard kill ==="; resubmit_or_stop "walltime signal"; exit 0' SIGUSR1
 
-echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME ==="
+echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME; TRAJ_ROOT=$TRAJ_ROOT WORK_DIR=$WORK_DIR ==="
 
 # Step 2: per-clip QC, unless the CSV is already newer than the manifest it was built from
 if [ -n "${RERUN_QC:-}" ] || [ ! -f "$QC_CSV" ] || [ "$TRAJ_ROOT/manifest.jsonl" -nt "$QC_CSV" ]; then
     echo "=== $(date -Iseconds) step 2: clip_qc.py"
-    "$CPU_PY" "$REPO_DIR/scripts/clip_qc.py" --out "$QC_CSV" --workers 32 || { echo "clip_qc.py failed" >&2; exit 1; }
+    "$CPU_PY" "$REPO_DIR/scripts/clip_qc.py" --traj_root "$TRAJ_ROOT" --out "$QC_CSV" --workers 32 || { echo "clip_qc.py failed" >&2; exit 1; }
 else
     echo "=== step 2 skipped: $QC_CSV is up to date"
 fi
@@ -117,7 +121,7 @@ if [ "$EXIT_CODE" -eq 0 ]; then
         || { echo "integration had failures -- NOT updating the manifest" >&2; exit 1; }
     echo "=== the per-clip files in $WORK_DIR are transient (their data is now in the clips' result.npz and the manifest); delete the folder when you no longer need the rerun poses / per-frame scales"
     echo "=== $(date -Iseconds) step 5: update_manifest_metric_scale.py"
-    "$CPU_PY" "$REPO_DIR/scripts/update_manifest_metric_scale.py" --traj_root "$TRAJ_ROOT" --qc_csv "$QC_CSV" \
+    "$CPU_PY" "$REPO_DIR/scripts/update_manifest_metric_scale.py" --traj_root "$TRAJ_ROOT" --manifest "$TRAJ_ROOT/manifest.jsonl" --qc_csv "$QC_CSV" \
         --metric_manifest "$PIPELINE_DIR/manifest_metric_scale.jsonl" --integration_log "$PIPELINE_DIR/integration_log.jsonl" --workers 24
     echo "=== $(date -Iseconds) all steps done"
     exit 0
