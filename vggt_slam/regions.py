@@ -28,7 +28,7 @@ def region_pbf_path(rel_path, osm_extracts_dir, region_name=None):
     region extract's path (see scripts/download_osm_extracts.py's naming -- "United States"
     clips are keyed by "United States_<State>", every other country by its own name directly)
     if osm_extracts_dir is set AND that region's extract actually exists there, else None (GPS
-    fusion is required to have a region extract -- see main.py's --osm_region_pbf_path -- so a
+    fusion is required to have a region extract -- see vggt_slam/pipeline.py's --osm_region_pbf_path -- so a
     clip whose region isn't covered here just has its GPS fusion skipped, non-fatally).
 
     region_name: override the region key resolved from rel_path -- used to look up a fallback
@@ -126,7 +126,7 @@ def region_candidates(rel_path, video_path, osm_extracts_dir):
     if primary is not None:
         return primary, fallback
     # No usable GPS centroid (e.g. all-'na' CSV) -- degrade to the folder-labeled region rather
-    # than skipping region resolution entirely; main.py/refuse_gps.py's own "No real GPS fixes"
+    # than skipping region resolution entirely; vggt_slam/fusion.py's own "No real GPS fixes"
     # handling already covers the case where GPS fusion can't run at all, so this fallback (and
     # FALLBACK_REGIONS, e.g. Austria->Croatia/Bosnia) is only actually exercised for the rarer
     # partial-GPS-data case now that the GPS-centroid path above handles the common one.

@@ -132,11 +132,6 @@ RUN cd /opt/vggtslam-src \
     # opencv-python wheel is CPU-only (no cv2.cuda backend at all, confirmed via
     # cv2.cuda.getCudaEnabledDeviceCount() returning 0 despite the module being importable).
     && sed -i '/^torch==/d;/^torchvision==/d;/^open3d/d;/^opencv-python/d' requirements.txt \
-    # Skip Perception Encoder / SAM 3 (setup.sh steps 4-5): they're only used for the optional
-    # --run_os open-set object detection feature, and pull in decord==0.6.0, which has no
-    # linux-aarch64 build anywhere (not even a source path) - not worth blocking core SLAM
-    # inference on this hardware.
-    && sed -i '/^# 4\. Install Perception Encoder/,/^# 6\. Install current repo/{/^# 6\. Install current repo/!d}' setup.sh \
     # setup.sh installs this repo and its third_party forks (salad, vggt) editable, pointing at
     # this throwaway copy - since that copy is deleted below, install everything as a real,
     # non-editable copy instead. The user's own `pip install -e .` at runtime (against the live
@@ -171,8 +166,7 @@ RUN pip install --no-cache-dir osmium
 # initUndistortRectifyMap) transitively needs features2d/flann, and video (calcOpticalFlowPyrLK,
 # still used as a fallback/reference) is small enough that trimming it isn't worth the risk of
 # missing a transitive dependency. GUI backends (WITH_GTK/WITH_QT=OFF) are skipped instead --
-# nothing in this pipeline calls cv2.imshow outside the debug-only visualize=True path in
-# frame_overlap.py, and this is a headless compute node with no display anyway.
+# nothing in this pipeline calls cv2.imshow, and this is a headless compute node with no display anyway.
 ARG OPENCV_REF=4.10.0
 RUN git clone --depth 1 --branch ${OPENCV_REF} https://github.com/opencv/opencv.git /opt/opencv-src \
     && git clone --depth 1 --branch ${OPENCV_REF} https://github.com/opencv/opencv_contrib.git /opt/opencv_contrib-src \

@@ -18,7 +18,7 @@ class FrameTracker:
             blockSize=7
         )
 
-    def compute_disparity(self, image, min_disparity, visualize=False):
+    def compute_disparity(self, image, min_disparity):
         if self.last_kf is None or self.kf_pts is None or len(self.kf_pts) < 10:
             self.initialize_keyframe(image)
             return True
@@ -43,15 +43,6 @@ class FrameTracker:
         # Measure displacement from keyframe to current frame
         displacement = np.linalg.norm(good_next - good_kf, axis=1)
         mean_disparity = np.mean(displacement)
-
-        if visualize:
-            vis = image.copy()
-            for p1, p2 in zip(good_kf, good_next):
-                p1 = tuple(p1.ravel().astype(int))
-                p2 = tuple(p2.ravel().astype(int))
-                cv2.arrowedLine(vis, p1, p2, color=(0, 255, 0), thickness=1, tipLength=0.3)
-            cv2.imshow("Optical Flow", vis)
-            cv2.waitKey(1)
 
         if mean_disparity > min_disparity:
             self.initialize_keyframe(image)

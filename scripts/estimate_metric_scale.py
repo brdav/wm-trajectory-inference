@@ -225,27 +225,17 @@ def worker(gpu_id, cfg, job_q, res_q):
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ[var] = str(cfg["cpu_threads"])
-    import argparse as _ap
     import torch
-    import main as vggt_main  # after torch, same order as batch_infer.gpu_worker
     from depth_anything_3.api import DepthAnything3
+    from vggt_slam import pipeline  # after torch, same order as batch_infer.gpu_worker
+    from vggt_slam.pipeline_params import SlamParams
     import batch_infer
     from vggt_slam.undistort import load_undistort_maps, undistort_frame
     torch.set_num_threads(cfg["cpu_threads"])
 
-    # SLAM settings = batch_infer.py's own defaults, minus GPS fusion, plus dense logging
-    bi = batch_infer.build_arg_parser().parse_args(["--video", "x", "--out_dir", "y"])
-    slam_args = dict(
-        model_backend=bi.model_backend, da3_checkpoint=bi.da3_checkpoint,
-        use_ray_pose=True, ref_view_strategy="middle",
-        vis_map=False, vis_imgs=False, vis_voxel_size=None, run_os=False, vis_flow=False,
-        headless=True, log_results=True, skip_dense_log=False, log_path="result.npz",
-        submap_size=bi.submap_size, overlapping_window_size=2, max_loops=bi.max_loops,
-        min_disparity=bi.min_disparity, conf_threshold=bi.conf_threshold, lc_thres=bi.lc_thres,
-        gps_csv=None, extraction_fps=cfg["fps"], gps_max_dt=bi.gps_max_dt,
-    )
-    backend, clip_model, clip_preprocess, clip_tokenizer, processor = vggt_main.build_backend(
-        _ap.Namespace(**slam_args), "cuda")
+    # SLAM settings = batch_infer.py's production defaults (no GPS fusion here, dense point-cloud logging on)
+    params = SlamParams()
+    backend = pipeline.build_backend(params, "cuda")
     metric_model = DepthAnything3.from_pretrained(cfg["metric_checkpoint"]).to("cuda")
 
     while True:
@@ -269,16 +259,10 @@ def worker(gpu_id, cfg, job_q, res_q):
             if clip.get("fixed_intrinsics_str") is None:
                 raise RuntimeError(f"undistortion failed: {clip.get('undistort_warning')}")
 
-            a = _ap.Namespace(**slam_args)
-            a.image_folder = clip["image_folder"]
-            a.fixed_intrinsics = clip["fixed_intrinsics_str"]
-            a.shared_intrinsics = False
-            a.undistort_maps_path = clip["undistort_maps_path"]
-            a.log_path = str(work_dir / "result.npz")
-            a.video = str(video)
-            a.osm_region_pbf_path = None
-            a.osm_fallback_region_pbf_path = None
-            vggt_main.run_video(a, backend, "cuda", clip_model, clip_preprocess, clip_tokenizer, processor)
+            pipeline.run_video(
+                params, backend, clip["image_folder"], str(work_dir / "result.npz"), str(video), cfg["fps"],
+                fixed_intrinsics=clip["fixed_intrinsics_str"], undistort_maps_path=clip["undistort_maps_path"],
+                dense_log=True)
 
             z = np.load(work_dir / "result.npz")
             frame_ids, slam_poses = z["frame_ids"], z["slam_poses"]

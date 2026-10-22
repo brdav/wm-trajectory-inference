@@ -15,7 +15,7 @@ IntrinsicsLock gives Solver two modes:
 
 (K unknown but constant across the video -- e.g. --shared_intrinsics -- is
 handled entirely outside this class, via da3_ray_pose_patch's two-phase joint
-K+R refit: see main.py's --shared_intrinsics validation and
+K+R refit: see vggt_slam/pipeline.py's --shared_intrinsics validation and
 da3_ray_pose_patch.joint_refit. That path pools every submap's free K
 estimate into a single whole-video median, which is far better-conditioned
 than an online running median updated one submap at a time -- so there is no

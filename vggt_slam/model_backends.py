@@ -120,7 +120,7 @@ class DA3Backend:
     decoder) this patch doesn't touch, so Solver's post-hoc IntrinsicsLock.apply() override
     remains the only mechanism there. --shared_intrinsics (K unknown but constant) does NOT go
     through known_intrinsics at all -- see vggt_slam.da3_ray_pose_patch's capture/joint_refit and
-    main.py's two-phase orchestration.
+    vggt_slam/pipeline.py's two-phase orchestration.
     """
 
     def __init__(self, model, use_ray_pose=True, ref_view_strategy="saddle_balanced"):
@@ -133,7 +133,7 @@ class DA3Backend:
             da3_ray_pose_patch.install()
 
     def set_undistort_maps(self, map1, map2, roi):
-        """Called once per clip (main.py's run_video) when frames on disk are raw/distorted --
+        """Called once per clip (vggt_slam/pipeline.py's run_video) when frames on disk are raw/distorted --
         makes _run's path-based fallback below (used by infer_loop_closure_pair, which re-reads
         by path instead of using frame_cache -- see its docstring) apply the same rectification
         the keyframe-selection producer thread applies, instead of silently reading a still-
@@ -154,7 +154,7 @@ class DA3Backend:
             from vggt_slam import da3_ray_pose_patch
             K_pixel, ref_wh, mode = known_intrinsics
             da3_ray_pose_patch.set_lock(K_pixel, ref_wh, mode)
-        # Use the already-decoded (RGB, already-undistorted) array main.py's keyframe-selection
+        # Use the already-decoded (RGB, already-undistorted) array vggt_slam/pipeline.py's keyframe-selection
         # pass cached for this path when available -- DA3's own inference() accepts np.ndarray
         # directly (see class docstring), so this skips a second read+decode of the same file
         # from disk for every frame that was already read once for the disparity check. Falls

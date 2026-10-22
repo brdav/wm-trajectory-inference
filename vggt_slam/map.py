@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import open3d as o3d
-from vggt_slam.slam_utils import decompose_camera, cosine_similarity
+from vggt_slam.slam_utils import decompose_camera
 
 class GraphMap:
     def __init__(self):
@@ -13,7 +13,7 @@ class GraphMap:
         return len(self.submaps)
 
     def add_submap(self, submap):
-        # Idempotent by submap id: main.py's two-phase --shared_intrinsics path registers each
+        # Idempotent by submap id: vggt_slam/pipeline.py's two-phase --shared_intrinsics path registers each
         # submap here as soon as it's created (phase 1, so retrieval-based loop-closure search
         # has something to match against for subsequent submaps), then add_points registers the
         # SAME submap again once its pose-graph data is actually attached (phase 3) -- without
@@ -42,32 +42,6 @@ class GraphMap:
     def get_latest_submap(self, ignore_loop_closure_submaps=False):
         return self.get_submap(self.get_largest_key(ignore_loop_closure_submaps))
 
-    def retrieve_best_semantic_frame(self, query_text_vector):
-        overall_best_score = 0.0
-        overall_best_submap_id = 0
-        overall_best_frame_index = 0
-        # search for best image to target image
-        sorted_keys = sorted(self.submaps.keys())
-        for index, submap_key in enumerate(sorted_keys):
-            submap = self.submaps[submap_key]
-            if submap.get_lc_status():
-                continue
-            submap_embeddings = submap.get_all_semantic_vectors()
-            scores = []
-            for index, embedding in enumerate(submap_embeddings):
-                score = cosine_similarity(embedding, query_text_vector)
-                scores.append(score)
-            
-            best_score_id = np.argmax(scores)
-            best_score = scores[best_score_id]
-
-            if best_score > overall_best_score:
-                overall_best_score = best_score
-                overall_best_submap_id = submap_key
-                overall_best_frame_index = best_score_id
-
-        return overall_best_score, overall_best_submap_id, overall_best_frame_index
-    
     def retrieve_best_score_frame(self, query_vector, current_submap_id, ignore_last_submap=True):
         overall_best_score = 1000
         overall_best_submap_id = 0

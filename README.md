@@ -94,14 +94,13 @@ so it can be purged, and `~/.cache/torch/hub` does not have them. The depth mode
 ## Tests
 
 CPU-only tests of the QC routing and manifest logic (synthetic data, a few seconds):
-`python -m pytest tests` (the `wm_env` conda env is enough; `test_result_npz.py` is skipped unless torchvision is
-installed, i.e. inside the container). Refactors that touch the SLAM / GPS-fusion path need a GPU run instead: process
+`python -m pytest tests` (the `wm_env` conda env is enough). Refactors that touch the SLAM / GPS-fusion path need a GPU run instead: process
 a few clips before and after and diff them with `python tests/compare_results.py <old_out> <new_out>`.
 
 ## Rebuild image (Podman + Enroot)
 
 A `Dockerfile` is provided for GPU clusters using Slurm with Pyxis/enroot, for when you need to
-change dependencies (edits to `vggt_slam/*.py`/`main.py` alone don't need a rebuild, just a `pip install -e .`).
+change dependencies (edits to `vggt_slam/*.py` alone don't need a rebuild, just a `pip install -e .`).
 
 Build the image once and convert it to a squashfs file for enroot:
 ```

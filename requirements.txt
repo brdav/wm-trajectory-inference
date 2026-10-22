@@ -9,7 +9,6 @@ safetensors
 pytorch_metric_learning
 pytorch-lightning
 termcolor
-viser==0.2.23
 tqdm
 omegaconf
 opencv-python
@@ -19,5 +18,3 @@ trimesh
 matplotlib
 lz4
 gtsam-develop
-ftfy
-regex

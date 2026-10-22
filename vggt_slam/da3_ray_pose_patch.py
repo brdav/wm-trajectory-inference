@@ -18,7 +18,7 @@ This module patches the estimation itself so K and R come out consistent, in two
     since K never changes.
 
   - two-phase joint calibration (--shared_intrinsics: K unknown but constant across the video):
-    main.py runs every submap's DA3 forward pass first (exactly one call per submap, same cost
+    vggt_slam/pipeline.py runs every submap's DA3 forward pass first (exactly one call per submap, same cost
     as today) with capture enabled -- each call's raw ray-pose material (rays_origin/target/
     weights/z_mask) is stashed instead of discarded, and DA3's own free per-frame K estimate is
     used for that submap in the meantime (nothing is locked yet). Once every submap has been
@@ -50,7 +50,7 @@ _ORIGINAL_COMPUTE = _ray_utils.compute_optimal_rotation_intrinsics_batch
 _ORIGINAL_PROCESS = _da3.DepthAnything3Net._process_ray_pose_estimation
 
 # Set by DA3Backend immediately before model.inference(...) and cleared immediately after; the
-# capture fields are toggled separately by main.py around its whole first pass. Not thread-safe
+# capture fields are toggled separately by vggt_slam/pipeline.py around its whole first pass. Not thread-safe
 # -- relies on the pipeline processing one submap's forward pass at a time (true today).
 _state = {
     "mode": None, "K_pixel": None, "ref_wh": None, "width": None, "height": None,
@@ -77,7 +77,7 @@ def clear_lock():
 
 def set_capture(enabled):
     """Toggles raw ray-pose material capture for the two-phase --shared_intrinsics joint fit.
-    Call with True before main.py's first pass over all submaps, False after -- this only stops
+    Call with True before vggt_slam/pipeline.py's first pass over all submaps, False after -- this only stops
     NEW entries from being captured; the buffer itself is untouched (joint_refit still needs to
     read it after this call) and is only ever cleared by joint_refit itself once it's done, or
     explicitly via clear_captured() if abandoning a capture pass early."""

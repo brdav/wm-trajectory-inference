@@ -25,7 +25,6 @@ class Submap:
         self.frame_ids = None
         self.is_lc_submap = False
         self.img_names = []
-        self.semantic_vectors = []
     
     def set_lc_status(self, is_lc_submap):
         self.is_lc_submap = is_lc_submap
@@ -157,9 +156,6 @@ class Submap:
     def set_conf_masks(self, conf_masks):
         self.conf_masks = conf_masks
     
-    def set_all_semantic_vectors(self, semantic_vectors):
-        self.semantic_vectors = semantic_vectors
-
     def get_pose_subframe(self, pose_index):
         return np.linalg.inv(self.poses[pose_index])
     
@@ -240,14 +236,3 @@ class Submap:
     def get_points_colors(self):
         colors = self.filter_data_by_confidence(self.colors)
         return colors.reshape(-1, 3)
-
-    def get_all_semantic_vectors(self):
-        return self.semantic_vectors
-
-    
-    def get_points_in_mask(self, frame_index, mask, graph):
-        points = self.get_points_list_in_world_frame(graph)[0][frame_index]
-        points_flat = points.reshape(-1, 3)
-        mask_flat = mask.reshape(-1)
-        points_in_mask = points_flat[mask_flat]
-        return points_in_mask

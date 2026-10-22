@@ -15,7 +15,7 @@ that appears to belong to some other, unrelated tracking pipeline (it ships 21-o
 alongside it) rather than the vehicle's actual device calibration.
 
 Ported from DVGT's tools/natix_inference/overlay_trajectory_on_video.py, adapted for VGGT-SLAM's
-own result.npz (written directly by main.py -- see vggt_slam.slam_utils.save_result_npz) instead
+own result.npz (written directly by vggt_slam/pipeline.py -- see vggt_slam.slam_utils.save_result_npz) instead
 of DVGT1's run_dvgt1_trajectory.py output -- the two aren't interchangeable in a way a key rename
 alone would fix: DVGT1's poses.npz stores a 'c2w' array sampled at a truly fixed 2Hz (BASE_FPS
 below, in the original script), so consecutive array rows are evenly spaced in time by
@@ -27,7 +27,7 @@ below is now parameterized by each pose's own real elapsed time (frame_id, extra
 seconds, not by its position in the array.
 
 Also needs the *GPS-fused/road-aligned* trajectory (result.npz's fused_poses field, written
-directly by main.py), not VGGT-SLAM's raw slam_poses: this script adds a literal camera_height_m
+directly by vggt_slam/pipeline.py), not VGGT-SLAM's raw slam_poses: this script adds a literal camera_height_m
 (real meters) to each position, which only makes sense once the trajectory's own scale is real
 metric meters -- raw VGGT-SLAM poses are in an arbitrary "visual gauge" scale (see gps_fusion.py)
 where that offset would be wrong by whatever the visual-gauge-to-meters scale factor happens to
@@ -416,7 +416,7 @@ def draw_path(img_rgba, uv):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--result_npz", required=True,
-                     help="main.py's result.npz -- uses its GPS-fused/road-aligned fused_poses "
+                     help="vggt_slam/pipeline.py's result.npz -- uses its GPS-fused/road-aligned fused_poses "
                           "field, NOT raw VGGT-SLAM slam_poses, which is in an arbitrary unscaled "
                           "gauge, not real meters (see module docstring)")
     ap.add_argument("--clip_dir", required=True,

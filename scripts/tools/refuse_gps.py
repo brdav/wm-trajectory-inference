@@ -113,119 +113,40 @@ def refuse_one(clip):
     """Runs in a worker process. Returns the manifest record dict (never raises -- any failure
     is captured into the record's own gps_fusion.status, same as batch_infer.py's per-clip
     try/except)."""
-    import numpy as np
-    from vggt_slam.regions import folder_region, region_candidates
-    from vggt_slam import gps as gps_module
-    from vggt_slam.gps_fusion import align_trajectory_to_roads
+    from vggt_slam.fusion import run_gps_fusion
     from vggt_slam.map_match import trim_osm_network_cache
+    from vggt_slam.regions import region_candidates
     from vggt_slam.slam_utils import save_result_npz, load_result_npz
 
     out_dir, video_path, gps_csv, rel = clip["out_dir"], clip["video_path"], clip["gps_csv"], clip["rel"]
     osm_extracts_dir = clip["osm_extracts_dir"]
     t0 = time.time()
-    clip_id = str(video_path)
     result_path = out_dir / "result.npz"
-    loaded = None
-
-    def _record_status(gps_fusion_info, fused_rot=None, fused_trans=None, matched_line=None,
-                        snapped=None):
-        # Keeps result.npz self-describing (its own gps_fusion_json reflects the latest
-        # attempt, not a stale one from a previous run) on every outcome, not just success --
-        # best-effort: a clip whose result.npz couldn't even be loaded has nothing to rewrite.
-        if loaded is None:
-            return
-        save_result_npz(result_path, loaded["frame_ids"], loaded["slam_rotations"],
-                         loaded["slam_translations"], loaded["extraction_fps"], loaded["video"],
-                         fused_rotations=fused_rot, fused_translations=fused_trans,
-                         matched_line=matched_line, snapped=snapped,
-                         gps_fusion_info=gps_fusion_info,
-                         # depth-based metric scale (scripts/integrate_metric_scale.py) is
-                         # independent of GPS fusion -- carry it over, don't drop it on rewrite
-                         metric_scale=loaded.get("metric_scale"),
-                         metric_poses=loaded.get("metric_poses"),
-                         metric_scale_info=loaded.get("metric_scale_info"))
-
     network_dir = out_dir / "osm_network"
+    gps_fusion_info = None
     try:
         _clear_stale_osm_network(out_dir)
-
         loaded = load_result_npz(result_path)
-        frame_ids = loaded["frame_ids"]
-        rotations = loaded["slam_rotations"]
-        translations = loaded["slam_translations"]
-        extraction_fps = loaded["extraction_fps"]
-
-        gps = gps_module.load_gps_fixes(str(gps_csv))
         region_pbf_path, fallback_paths = region_candidates(rel, video_path, osm_extracts_dir)
-        if not region_pbf_path:
-            raise ValueError(f"no region extract for {folder_region(rel)} under {osm_extracts_dir}")
-
-        (fused_rot, fused_trans, scale, matches, matched_line, snapped, region_used,
-         network_profile) = align_trajectory_to_roads(
-            rotations, translations, frame_ids, extraction_fps, gps, str(network_dir),
-            str(region_pbf_path), fallback_region_pbf_path=[str(p) for p in fallback_paths] or None,
-        )
-
-        used_fallback = region_used is not None and region_used != str(region_pbf_path)
-        gps_fusion_info = {
-            "region_used": region_used, "used_fallback": used_fallback,
-            "network_profile_used": network_profile,
-            "matched_keyframes": len(matches), "total_keyframes": len(frame_ids),
-        }
-
-        if matched_line is not None:
-            gps_fusion_info["status"] = "ok"
-            traj_en = fused_trans[:, [0, 2]]
-            ok = ~np.isnan(snapped[:, 0])
-            if ok.any():
-                dev = np.linalg.norm(traj_en[ok] - snapped[ok], axis=1)
-                gps_fusion_info["map_match_error_mean_m"] = float(dev.mean())
-                gps_fusion_info["map_match_error_max_m"] = float(dev.max())
-                gps_fusion_info["map_match_error_n_points"] = int(ok.sum())
-        elif region_used is None:
-            gps_fusion_info["status"] = "no_roads_in_any_region"
-        else:
-            gps_fusion_info["status"] = "no_route_match"
-
-        _record_status(gps_fusion_info, fused_rot, fused_trans, matched_line, snapped)
-
-        return {"clip_id": clip_id, "ok": True,
-                "seconds": time.time() - t0, "gps_fusion": gps_fusion_info}
-    except ValueError as e:
-        # Same status ladder as main.py's except-ValueError branch (rationale: memory/gps-fusion-notes.md).
-        if "no roads found near the GPS fixes" in str(e):
-            gps_fusion_info = {"status": "no_roads_in_any_region", "error": str(e)}
-        elif "raw-GPS map-match unavailable" in str(e):
-            if "matched_line=found" in str(e):
-                gps_fusion_info = {"status": "no_raw_gps_route_too_sparse", "error": str(e)}
-            else:
-                gps_fusion_info = {"status": "no_raw_gps_route_unmatched", "error": str(e)}
-        elif "implausible GPS-derived scale" in str(e):
-            gps_fusion_info = {"status": "implausible_gps_scale", "error": str(e)}
-        elif "No real GPS fixes" in str(e):
-            # Every row in this clip's sensor log is 'na'.
-            gps_fusion_info = {"status": "no_real_gps_fixes", "error": str(e)}
-        elif "keyframe(s) matched to a GPS fix" in str(e):
-            # Fewer than 2 keyframes within max_dt of a real GPS fix.
-            gps_fusion_info = {"status": "insufficient_gps_matches", "error": str(e)}
-        elif "distinct timestamp(s)" in str(e):
-            # Fewer than 2 distinct timestamps in the sensor log.
-            gps_fusion_info = {"status": "gps_log_too_short", "error": str(e)}
-        else:
-            gps_fusion_info = {"status": "failed", "error": traceback.format_exc()[-2000:]}
-        _record_status(gps_fusion_info)
-        return {"clip_id": clip_id, "ok": True, "seconds": time.time() - t0,
-                "gps_fusion": gps_fusion_info}
+        gps_fusion_info, fused = run_gps_fusion(
+            loaded["slam_rotations"], loaded["slam_translations"], loaded["frame_ids"], loaded["extraction_fps"],
+            gps_csv, network_dir, region_pbf_path, fallback_paths, traceback_chars=2000, label=str(video_path))
+        fused = fused or {}
+        # keeps result.npz self-describing: its gps_fusion_json reflects this attempt on every outcome
+        save_result_npz(result_path, loaded["frame_ids"], loaded["slam_rotations"], loaded["slam_translations"],
+                        loaded["extraction_fps"], loaded["video"],
+                        fused_rotations=fused.get("rotations"), fused_translations=fused.get("translations"),
+                        matched_line=fused.get("matched_line"), snapped=fused.get("snapped"),
+                        gps_fusion_info=gps_fusion_info,
+                        # the depth-based metric scale (scripts/integrate_metric_scale.py) is independent of
+                        # GPS fusion: carry it over, don't drop it on rewrite
+                        metric_scale=loaded.get("metric_scale"), metric_poses=loaded.get("metric_poses"),
+                        metric_scale_info=loaded.get("metric_scale_info"))
     except Exception:
+        # result.npz itself unreadable: nothing to rewrite, just record the outcome
         gps_fusion_info = {"status": "failed", "error": traceback.format_exc()[-2000:]}
-        _record_status(gps_fusion_info)
-        return {"clip_id": clip_id, "ok": True,
-                "seconds": time.time() - t0, "gps_fusion": gps_fusion_info}
-    finally:
-        # Trims osm_network/ down to just network.osm regardless of outcome -- see
-        # trim_osm_network_cache's own docstring for why the rest (prepared*/ graphs,
-        # tracks.csv, results/) has no lasting value once this attempt is done.
         trim_osm_network_cache(network_dir)
+    return {"clip_id": str(video_path), "ok": True, "seconds": time.time() - t0, "gps_fusion": gps_fusion_info}
 
 
 def _init_worker(osm_extracts_dir):

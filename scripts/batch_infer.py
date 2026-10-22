@@ -18,7 +18,7 @@ once inside an allocation that already has the vggtslam_image container attached
 Architecture:
   - One persistent GPU worker process per GPU (--num_gpus x --workers_per_gpu), each loading
     the geometry model ONCE and then looping over many clips pulled from a shared queue --
-    this avoids the model-reload cost that a fresh `python main.py` per clip would pay on every
+    this avoids the model-reload cost that a fresh process per clip would pay on every
     single clip (still paid once, unavoidably, in single-clip mode).
     Per-clip GPU compute is bursty
     (~1s forward pass per submap; most of a clip's wall-clock is CPU-side pipeline/
@@ -40,10 +40,10 @@ Architecture:
     simply be resubmitted to pick up where it left off: a clip counts as done if it has a loose
     result.npz, an ok row in <out_root>/manifest.jsonl, or its result.npz inside its session's
     zip (scripts/pack_sessions.py archives finished sessions).
-  - GPS/road-fusion (main.py's --gps_csv path) is ON by default: it map-matches against live
-    OSM data per clip, using each video's sibling FRONT_*.csv automatically (no registry --
-    just same basename, .csv extension). This is a per-clip external-network dependency, so
-    pass --no-gps_fusion if it bottlenecks a very large batch.
+  - GPS/road-fusion (vggt_slam/fusion.py) is ON by default: it map-matches against the
+    pre-downloaded OSM region extracts, using each video's sibling FRONT_*.csv automatically (no registry --
+    just same basename, .csv extension). Pass --no-gps_fusion to skip it
+    if it bottlenecks a very large batch.
 
 Per-clip intrinsics policy (always on, not configurable; rationale: memory/backend-choice.md):
   - Every clip is checked for a sibling FIXED_METADATA.json (natix trip-dir convention:
@@ -53,9 +53,9 @@ Per-clip intrinsics policy (always on, not configurable; rationale: memory/backe
     least one clip, so it's never trusted on its own).
   - If found: undistortion remap tables are computed once (vggt_slam/undistort.py) from its
     camera_front entry's distortion coefficients and cached; frames themselves are undistorted
-    in-memory by main.py, only for the ones it selects as keyframes -- no second copy of the
+    in-memory by vggt_slam/pipeline.py, only for the ones it selects as keyframes -- no second copy of the
     frames is ever written to disk. The RESULTING rectified K (not the pre-distortion one --
-    undistortion changes it) is passed to main.py as --fixed_intrinsics.
+    undistortion changes it) is passed to the SLAM as its fixed intrinsics.
   - If not found (or its declared resolution can't be verified against the actual video):
     frames are left as-is and --shared_intrinsics is used instead (self-calibrate a single
     consensus K for the whole clip via the two-phase joint fit -- see
@@ -94,6 +94,7 @@ os.environ.setdefault("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=4000000"
 
 sys.path.insert(0, str(REPO_DIR))
 from vggt_slam.paths import DATASET_ROOT, SAMPLE_MANIFEST, TRAJ_ROOT
+from vggt_slam.pipeline_params import SlamParams
 from vggt_slam.regions import region_candidates
 from vggt_slam.sample_manifest import source_videos
 from vggt_slam.session_pack import session_zip_path
@@ -298,7 +299,7 @@ def extract_one(clip, fps, ffmpeg_threads=0):
 
     # No second (undistorted) copy of the frames is ever written to disk: the remap tables only
     # depend on resolution + known distortion, not frame content, so they're computed once here
-    # from a single frame's shape and cached; main.py loads them and undistorts in-memory, only
+    # from a single frame's shape and cached; vggt_slam/pipeline.py loads them and undistorts in-memory, only
     # for the frames it actually keeps as keyframes (see vggt_slam/undistort.py's docstring).
     #
     # Cached at the SESSION level (session_cache_dir), not per-clip: every clip sharing one
@@ -345,7 +346,7 @@ def extract_one(clip, fps, ffmpeg_threads=0):
     return clip, None
 
 
-def gpu_worker(gpu_id, base_args, job_queue, result_queue, keep_frames, gps_fusion, cpu_threads):
+def gpu_worker(gpu_id, run_cfg, job_queue, result_queue, keep_frames, gps_fusion, cpu_threads):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     # Without this, each worker process's PyTorch/MKL/OpenMP/OpenBLAS defaults to sizing its
     # intra-op thread pool off the node's FULL core count (288 here), not knowing it's one of
@@ -362,14 +363,11 @@ def gpu_worker(gpu_id, base_args, job_queue, result_queue, keep_frames, gps_fusi
         os.environ[var] = str(cpu_threads)
     sys.path.insert(0, str(REPO_DIR))
 
-    import argparse as _argparse
     import torch
-    import main as vggt_main
+    from vggt_slam import pipeline
     torch.set_num_threads(cpu_threads)
 
-    device = "cuda"
-    args = _argparse.Namespace(**base_args)
-    backend, clip_model, clip_preprocess, clip_tokenizer, processor = vggt_main.build_backend(args, device)
+    backend = pipeline.build_backend(run_cfg["params"], "cuda")
 
     while True:
         _t_wait0 = time.time()
@@ -388,7 +386,7 @@ def gpu_worker(gpu_id, base_args, job_queue, result_queue, keep_frames, gps_fusi
         # if this whole worker process dies uncaught (OOM/SIGKILL, a fatal CUDA/driver error, a
         # native segfault, ...) -- none of which the try/except below can ever catch, since the
         # process itself is gone, not just the current Python call. Confirmed to happen in
-        # practice: several clips ended up with a partial result.npz on disk (from vggt_main's
+        # practice: several clips ended up with a partial result.npz on disk (from the pipeline's
         # own SLAM-stage save) but no manifest.jsonl record at all, silently un-retriable forever
         # after since discover_clips's skip-check only looks at result.npz existing. See
         # _reap_dead_workers in main() for the other half of this.
@@ -400,28 +398,23 @@ def gpu_worker(gpu_id, base_args, job_queue, result_queue, keep_frames, gps_fusi
                       f"--shared_intrinsics instead:\n{job['undistort_warning']}",
                       file=sys.stderr, flush=True)
 
-            clip_args = _argparse.Namespace(**base_args)
-            clip_args.image_folder = job["image_folder"]
-            clip_args.fixed_intrinsics = job["fixed_intrinsics_str"]
-            clip_args.shared_intrinsics = job["fixed_intrinsics_str"] is None
-            clip_args.undistort_maps_path = job.get("undistort_maps_path")
-            clip_args.log_path = str(out_dir / "result.npz")
-            clip_args.video = str(video_path)
-            clip_args.gps_csv = None
-            clip_args.osm_region_pbf_path = None
-            clip_args.osm_fallback_region_pbf_path = None
+            gps_csv = osm_region_pbf_path = osm_fallback_region_pbf_paths = None
             if gps_fusion:
                 sibling_csv = video_path.with_suffix(".csv")
                 if sibling_csv.exists():
-                    clip_args.gps_csv = str(sibling_csv)
+                    gps_csv = str(sibling_csv)
                     if job.get("osm_region_pbf_path"):
-                        clip_args.osm_region_pbf_path = str(job["osm_region_pbf_path"])
+                        osm_region_pbf_path = str(job["osm_region_pbf_path"])
                     if job.get("osm_fallback_region_pbf_paths"):
-                        clip_args.osm_fallback_region_pbf_path = [
-                            str(p) for p in job["osm_fallback_region_pbf_paths"]]
+                        osm_fallback_region_pbf_paths = [str(p) for p in job["osm_fallback_region_pbf_paths"]]
 
-            gps_fusion_info = vggt_main.run_video(
-                clip_args, backend, device, clip_model, clip_preprocess, clip_tokenizer, processor)
+            gps_fusion_info = pipeline.run_video(
+                run_cfg["params"], backend, job["image_folder"], str(out_dir / "result.npz"), str(video_path),
+                run_cfg["extraction_fps"], fixed_intrinsics=job["fixed_intrinsics_str"],
+                shared_intrinsics=job["fixed_intrinsics_str"] is None,
+                undistort_maps_path=job.get("undistort_maps_path"), dense_log=run_cfg["dense_log"],
+                gps_csv=gps_csv, osm_region_pbf_path=osm_region_pbf_path,
+                osm_fallback_region_pbf_paths=osm_fallback_region_pbf_paths, gps_max_dt=run_cfg["gps_max_dt"])
 
             if not keep_frames:
                 # frames_dir's parent is the clip's whole scratch subtree (just frames/ now --
@@ -492,18 +485,16 @@ def build_arg_parser():
     p.add_argument("--dense_log", action="store_true",
                     help="Also write the full dense point cloud (result_points.pcd) per clip. Off by default "
                          "(too much storage across a full batch); meant for single-clip debugging runs")
-    # Passthrough knobs mirroring main.py's own defaults; batch runs never use
-    # vis_map/vis_imgs/run_os/vis_flow (headless) or dense point-cloud logging (too much
-    # storage across many clips). use_ray_pose/overlapping_window_size/ref_view_strategy and
-    # per-clip intrinsics handling are fixed policy for this script, not exposed as flags --
-    # see the module docstring.
-    p.add_argument("--model_backend", default="da3", choices=["vggt", "da3"])
-    p.add_argument("--da3_checkpoint", default="depth-anything/DA3-GIANT-1.1")
-    p.add_argument("--submap_size", type=int, default=16)
-    p.add_argument("--max_loops", type=int, default=1)
-    p.add_argument("--min_disparity", type=float, default=25)
-    p.add_argument("--conf_threshold", type=float, default=25.0)
-    p.add_argument("--lc_thres", type=float, default=0.95)
+    # SLAM settings (vggt_slam.pipeline_params.SlamParams); use_ray_pose / overlapping_window_size /
+    # ref_view_strategy and the per-clip intrinsics handling are fixed policy for this script, not flags
+    d = SlamParams()
+    p.add_argument("--model_backend", default=d.model_backend, choices=["vggt", "da3"])
+    p.add_argument("--da3_checkpoint", default=d.da3_checkpoint)
+    p.add_argument("--submap_size", type=int, default=d.submap_size)
+    p.add_argument("--max_loops", type=int, default=d.max_loops)
+    p.add_argument("--min_disparity", type=float, default=d.min_disparity)
+    p.add_argument("--conf_threshold", type=float, default=d.conf_threshold)
+    p.add_argument("--lc_thres", type=float, default=d.lc_thres)
     p.add_argument("--gps_max_dt", type=float, default=0.5)
     p.add_argument("--osm_extracts_dir", type=str, default=None,
                    help="Dir of pre-downloaded whole-region OSM extracts, one per dataset country "
@@ -534,23 +525,6 @@ def main():
         parser.error("--video requires --out_dir")
     # without --video this is batch mode over --sample_manifest (dataset root / out root default to the natix locations)
 
-    if args.gps_fusion:
-        # Needed by vggt_slam.map_match._extract_local_bbox for any clip whose region has a
-        # pre-downloaded extract (see --osm_extracts_dir). This container's package installs
-        # don't persist across separate `srun` invocations, but DO persist for every process
-        # (including multiprocessing-spawned GPU workers) within this one -- so install once,
-        # here, before those workers start. Not check=True: a compute node with no/flaky
-        # internet (observed: PyPI DNS failures here) must not crash the entire multi-hour batch
-        # over this one optional package (map_match.py's own docstring: "not a hard dependency")
-        # -- gpu_worker's per-clip try/except already degrades a single clip gracefully if
-        # `import osmium` ends up failing, so worst case here is losing GPS fusion, not the run.
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-                            "--index-url", "https://pypi.org/simple", "--no-deps", "osmium"], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"[WARN] pip install osmium failed ({e}) -- GPS fusion will fail per-clip if "
-                  "osmium isn't already importable in this container", file=sys.stderr, flush=True)
-
     osm_extracts_dir = args.osm_extracts_dir
     if osm_extracts_dir is None and not args.video:
         osm_extracts_dir = str(Path(args.out_root) / "_osm_extracts")
@@ -567,8 +541,8 @@ def main():
             "frames_dir": Path(args.scratch_dir) / out_dir.name / "frames",
             "camera_meta": _resolve_camera_meta(video_path),
             "osm_region_pbf_path": Path(args.osm_region_pbf_path) if args.osm_region_pbf_path else None,
-            "osm_fallback_region_pbf_path": (
-                Path(args.osm_fallback_region_pbf_path) if args.osm_fallback_region_pbf_path else None),
+            "osm_fallback_region_pbf_paths": (
+                [Path(args.osm_fallback_region_pbf_path)] if args.osm_fallback_region_pbf_path else []),
         }]
         manifest_dir = out_dir
     else:
@@ -578,16 +552,12 @@ def main():
                                 args.limit, args.force, osm_extracts_dir, args.sample_manifest)
         manifest_dir = Path(args.out_root)
 
-    base_args = dict(
-        model_backend=args.model_backend, da3_checkpoint=args.da3_checkpoint,
-        use_ray_pose=True, ref_view_strategy="middle",
-        vis_map=False, vis_imgs=False, vis_voxel_size=None, run_os=False, vis_flow=False,
-        headless=True,
-        log_results=True, skip_dense_log=not args.dense_log, log_path="result.npz",
-        submap_size=args.submap_size, overlapping_window_size=2,
-        max_loops=args.max_loops, min_disparity=args.min_disparity,
-        conf_threshold=args.conf_threshold, lc_thres=args.lc_thres,
-        gps_csv=None, extraction_fps=args.fps, gps_max_dt=args.gps_max_dt,
+    run_cfg = dict(
+        params=SlamParams(
+            model_backend=args.model_backend, da3_checkpoint=args.da3_checkpoint, submap_size=args.submap_size,
+            max_loops=args.max_loops, min_disparity=args.min_disparity, conf_threshold=args.conf_threshold,
+            lc_thres=args.lc_thres),
+        extraction_fps=args.fps, gps_max_dt=args.gps_max_dt, dense_log=args.dense_log,
     )
 
     import multiprocessing as mp
@@ -601,7 +571,7 @@ def main():
           f"(OMP/MKL/OpenBLAS/torch)", flush=True)
 
     workers = [
-        ctx.Process(target=gpu_worker, args=(gpu_id, base_args, job_queue, result_queue,
+        ctx.Process(target=gpu_worker, args=(gpu_id, run_cfg, job_queue, result_queue,
                                               args.keep_frames, args.gps_fusion, cpu_threads))
         for gpu_id in range(args.num_gpus)
         for _ in range(args.workers_per_gpu)
@@ -630,7 +600,7 @@ def main():
         # uncaught (OOM/SIGKILL, a fatal CUDA/driver error, a native segfault, ...) while a clip
         # was in flight -- that clip's job never gets a completion message at all, and without
         # this it would just be silently dropped: no manifest.jsonl record, and whatever partial
-        # result.npz vggt_main's own SLAM-stage save left behind on disk would make every future
+        # result.npz the pipeline's own SLAM-stage save left behind on disk would make every future
         # run's discover_clips skip-check treat it as already done, forever. Confirmed to happen
         # in practice this way.
         nonlocal done

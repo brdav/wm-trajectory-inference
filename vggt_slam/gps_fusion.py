@@ -378,10 +378,10 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
     primary leg, so this final pass is not optional bookkeeping the way it might look; it's the
     only place the excluded segment (if any) and the reported route/snapped positions ever get
     computed together. Both None if map-matching-2 never found a match on the full trajectory.
-    Saved by main.py alongside fused_rot/fused_trans so the road alignment can be plotted
+    Saved by vggt_slam/pipeline.py alongside fused_rot/fused_trans so the road alignment can be plotted
     without re-running this whole function.
     region_used is whichever of osm_region_pbf_path / fallback_region_pbf_path actually had roads
-    near the GPS fixes (None if none did) -- main.py records this in the manifest.
+    near the GPS fixes (None if none did) -- vggt_slam/pipeline.py records this in the manifest.
     network_profile is "car" or "manual_drivable" -- whichever build_network profile actually won
     (see map_match_fallback_error_m above); callers can record this in the manifest to see how
     often the fallback was actually needed across the dataset.
@@ -464,7 +464,7 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
     _, probe_edges = build_network(crop_center_lat, crop_center_lon, crop_buffer_m, to_utm,
                                     network_dir, region_pbf_path=osm_region_pbf_path)
     # Which region extract actually had roads near this clip's GPS fixes -- None means neither the
-    # labeled region nor any fallback candidate did. Reported back to the caller (see main.py) so
+    # labeled region nor any fallback candidate did. Reported back to the caller (see vggt_slam/pipeline.py) so
     # it ends up in the manifest as structured, queryable data instead of only a log line: at
     # dataset scale, "was the fallback ever actually needed/used, and did it even help" needs to
     # be answerable without grepping every clip's log.

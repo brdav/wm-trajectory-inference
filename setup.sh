@@ -31,21 +31,7 @@ pip install -e ./stubs/pycolmap_stub
 pip install --no-deps depth-anything-3==0.1.1
 pip install "moviepy==1.0.3" evo e3nn typer fastapi uvicorn addict
 
-# 4. Install Perception Encoder
-echo "Cloning and installing Perception Encoder..."
-cd third_party
-git clone https://github.com/facebookresearch/perception_models.git
-pip install -e ./perception_models
-cd ..
-
-# 5. Install SAM 3
-echo "Cloning and installing SAM 3..."
-cd third_party
-git clone https://github.com/facebookresearch/sam3.git
-pip install -e ./sam3
-cd ..
-
-# 6. Install current repo in editable mode
+# 4. Install current repo in editable mode
 echo "Installing current repo..."
 pip install -e .
 

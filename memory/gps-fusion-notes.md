@@ -2,7 +2,7 @@
 
 ## Failure-status audit (why the statuses exist)
 In one `manifest.jsonl` audit, ~72% of all "failed" `gps_fusion` records were really one of two
-data-quality cases, which is why `batch_infer`/`main.py` give them their own structured status
+data-quality cases, which is why `batch_infer`/`vggt_slam/fusion.py` give them their own structured status
 instead of the generic "failed" bucket:
 - `no_real_gps_fixes` (every row of the sensor log is 'na'): 70.9% of the failures, nothing to fix in code.
 - `insufficient_gps_matches` (< 2 keyframes within max_dt of a fix): 20.2%.

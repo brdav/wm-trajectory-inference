@@ -1,66 +1,40 @@
 import numpy as np
 import cv2
 import gtsam
-import matplotlib.pyplot as plt
 import torch
 import time
-import open3d as o3d
 from termcolor import colored
 from scipy.linalg import rq
 
 from vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
 
-from vggt_slam.slam_utils import compute_image_embeddings, Accumulator
+from vggt_slam.slam_utils import Accumulator
 from vggt_slam.loop_closure import ImageRetrieval
 from vggt_slam.frame_overlap import FrameTracker
 from vggt_slam.map import GraphMap
 from vggt_slam.submap import Submap
 from vggt_slam.graph import PoseGraph
 from vggt_slam.scale_solver import estimate_scale_pairwise
-from vggt_slam.viewer import Viewer
 from vggt_slam.intrinsics_lock import IntrinsicsLock
 from vggt_slam import da3_ray_pose_patch
-
-DEBUG = False
-
-def debug_visualize(pcd1_points, pcd2_points):
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(pcd1_points)
-    pcd1.paint_uniform_color([1, 0, 0])  # red
-
-    pcd2 = o3d.geometry.PointCloud()
-    pcd2.points = o3d.utility.Vector3dVector(pcd2_points)
-    pcd2.paint_uniform_color([0, 0, 1])  # blue
-
-    o3d.visualization.draw_geometries([pcd1, pcd2], window_name="Pairwise Point Clouds")
 
 class Solver:
     def __init__(self,
         init_conf_threshold: float,  # represents percentage (e.g., 50 means filter lowest 50%)
         lc_thres: float = 0.80,
-        vis_voxel_size: float = None,
-        vis_imgs: bool = False,
         overlapping_window_size: int = 1,
         fixed_intrinsics: np.ndarray = None,
-        fixed_intrinsics_size: tuple = None,
-        headless: bool = False):
+        fixed_intrinsics_size: tuple = None):
 
         self.init_conf_threshold = init_conf_threshold
-        self.vis_voxel_size = vis_voxel_size
-        self.vis_imgs = vis_imgs
         self.overlapping_window_size = overlapping_window_size
         self.intrinsics_lock = IntrinsicsLock(fixed_intrinsics, fixed_intrinsics_size)
-
-        # A real viser.ViserServer (network server + full-resolution point-cloud serialization
-        # per submap) is expensive and pointless when nothing ever views it, e.g. one persistent
-        # server per clip across a many-clip batch run -- skip creating it entirely.
-        self.viewer = None if headless else Viewer()
 
         self.flow_tracker = FrameTracker()
         self.map = GraphMap()
         self.graph = PoseGraph()
         # Where find_loop_closures searches -- self.map by default (matching every submap ever
-        # actually committed, exactly as before). main.py's two-phase --shared_intrinsics path
+        # actually committed, exactly as before). vggt_slam/pipeline.py's two-phase --shared_intrinsics path
         # points this at a separate, phase-1-only GraphMap instead: self.map must stay empty
         # until phase 3 (add_edge's "find the previous submap" logic depends on self.map holding
         # ONLY the submaps already committed, in order), but retrieval-based loop-closure search
@@ -71,61 +45,14 @@ class Solver:
         self.current_working_submap = None
         # Tracked independently of self.map's contents (rather than derived from
         # self.map.get_largest_key()) so submap IDs come out correctly even when add_points is
-        # deferred well past run_predictions -- as main.py's two-phase --shared_intrinsics path
+        # deferred well past run_predictions -- as vggt_slam/pipeline.py's two-phase --shared_intrinsics path
         # does, running every submap's forward pass before adding any of them to the map.
         self._next_submap_id = 0
 
         self.lc_thres = lc_thres
 
-        self.temp_count = 0
         self.backend_timer = Accumulator()
         self.loop_closure_timer = Accumulator()
-        self.clip_timer = Accumulator()
-
-    def set_point_cloud(self, points_in_world_frame, points_colors, name, point_size):
-        if self.viewer is None:
-            return
-        if self.vis_voxel_size is not None:
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points_in_world_frame.astype(np.float64))
-            pcd.colors = o3d.utility.Vector3dVector(points_colors.astype(np.float64) / 255.0)
-            pcd = pcd.voxel_down_sample(self.vis_voxel_size)
-            points_in_world_frame = np.asarray(pcd.points, dtype=np.float32)
-            points_colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
-        self.viewer.server.scene.add_point_cloud(
-            name="pcd_"+name,
-            points=points_in_world_frame,
-            colors=points_colors,
-            point_size=point_size,
-            point_shape="circle",
-        )
-
-    def set_submap_point_cloud(self, submap):
-        # Add the point cloud to the visualization.
-        if self.viewer is None:
-            return
-        points_in_world_frame = submap.get_points_in_world_frame(self.graph)
-        points_colors = submap.get_points_colors()
-        name = str(submap.get_id())
-        self.set_point_cloud(points_in_world_frame, points_colors, name, 0.001)
-
-    def set_submap_poses(self, submap):
-        # Add the camera poses to the visualization.
-        if self.viewer is None:
-            return
-        extrinsics = submap.get_all_poses_world(self.graph)
-        images = submap.get_all_frames() if self.vis_imgs else None
-        self.viewer.visualize_frames(extrinsics, images, submap.get_id())
-
-    def update_all_submap_vis(self):
-        for submap in self.map.get_submaps():
-            self.set_submap_point_cloud(submap)
-            self.set_submap_poses(submap)
-
-    def update_latest_submap_vis(self):
-        submap = self.map.get_latest_submap()
-        self.set_submap_point_cloud(submap)
-        self.set_submap_poses(submap)
 
     def tranform_submap_to_canonical(self, proj_mat_world_to_cam, world_points):
         P_first_cam = proj_mat_world_to_cam[0].copy()
@@ -191,9 +118,6 @@ class Solver:
             scale_factor = scale_factor_est_output[0]
             H_scale = np.diag((scale_factor, scale_factor, scale_factor, 1.0))
 
-            if DEBUG:
-                print("Estimated scale factor between submaps:", scale_factor)
-                debug_visualize(scale_factor*t1, t2)
 
             # Compute the first camera matrix of the new submap in world frame.
             H_overlap_prior_overlap_current = np.linalg.inv(prior_submap.proj_mats[anchor_frame_prev]) @ current_submap.proj_mats[frame_id_curr] @ H_scale
@@ -206,16 +130,11 @@ class Solver:
             # Add between factor for intra submaps constraint.
             self.graph.add_between_factor(overlapping_node_id_prev, submap_id_curr + frame_id_curr, H_overlap_prior_overlap_current, self.graph.intra_submap_noise)
 
-            if DEBUG:
-                print("Adding first homography of submap: \n", submap_id_curr + frame_id_curr, H_w_submap / H_w_submap[-1,-1])
-                print("Adding between factor: \n", overlapping_node_id_prev, submap_id_curr + frame_id_curr, H_scale)
 
         else:
             assert (submap_id_curr == 0 and frame_id_curr == 0), "First added node must be submap 0 frame 0"
             self.graph.add_homography(submap_id_curr + frame_id_curr, H_w_submap)
             self.graph.add_prior_factor(submap_id_curr + frame_id_curr, H_w_submap)
-            if DEBUG:
-                print("Adding first homography of graph: \n", submap_id_curr + frame_id_curr, H_w_submap / H_w_submap[-1,-1])
 
         # Loop closure only gets intra submap constraints.
         if is_loop_closure:
@@ -236,9 +155,6 @@ class Solver:
             # Add between factor for inner submap constraint.
             self.graph.add_between_factor(submap_id_curr + index - 1, submap_id_curr + index, H_inner, self.graph.inner_submap_noise)
 
-            if DEBUG:
-                print("Adding homography: \n", submap_id_curr + index, current_node / current_node[-1,-1])
-                print("Adding between factor: \n", submap_id_curr + index - 1, submap_id_curr + index, H_inner)
 
         # With overlap > 1, frames 1..overlap-1 of the current submap are ALSO physically the
         # same frames as prior_submap's anchor_frame_prev+1..frame_id_prev -- each was just added
@@ -269,7 +185,7 @@ class Solver:
         """
         # Unpack prediction dict
         # Explicitly re-bind to the submap object this pred_dict was actually created for, rather
-        # than trusting self.current_working_submap to still point at it: main.py's two-phase
+        # than trusting self.current_working_submap to still point at it: vggt_slam/pipeline.py's two-phase
         # --shared_intrinsics path runs every submap's run_predictions() call (each of which
         # reassigns self.current_working_submap) well before any of their add_points() calls, so
         # by the time this runs, self.current_working_submap would otherwise just be whichever
@@ -361,7 +277,7 @@ class Solver:
         pixel_coords = torch.stack((y_coords, x_coords), dim=1)
         return pixel_coords
 
-    def run_predictions(self, image_names, backend, max_loops, clip_model, clip_preprocess, frame_cache=None):
+    def run_predictions(self, image_names, backend, max_loops, frame_cache=None):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         known_intrinsics = self.intrinsics_lock.get_backend_lock()
         t1 = time.time()
@@ -385,11 +301,6 @@ class Solver:
         new_submap.set_last_non_loop_frame_index(images.shape[0] - 1)
         new_submap.set_all_retrieval_vectors(self.image_retrieval.get_all_submap_embeddings(new_submap))
         new_submap.set_img_names(image_names)
-
-        with self.clip_timer:
-            if clip_model is not None and clip_preprocess is not None:
-                image_embs = compute_image_embeddings(clip_model, clip_preprocess, image_names)
-                new_submap.set_all_semantic_vectors(image_embs)
 
         self.current_working_submap = new_submap
         predictions["_submap"] = new_submap
@@ -417,17 +328,6 @@ class Solver:
                     device=device,
                     known_intrinsics=known_intrinsics,
                 )
-
-            # Visualize loop closure frames
-            if DEBUG:
-                imgs = predictions_lc["frames_lc"].permute(0, 2, 3, 1).cpu().numpy()  # shape -> (2, H, W, C)
-                fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-                for i in range(2):
-                    axes[i].imshow(imgs[i])
-                    axes[i].axis('off')
-                plt.tight_layout()
-                plt.title("Loop Closure Frames. Left: Query Frame, Right: Retrieved Frame")
-                plt.show()
 
         predictions["detected_loops"] = detected_loops
 

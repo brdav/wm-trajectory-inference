@@ -2,7 +2,6 @@
 import numpy as np
 import pytest
 
-pytest.importorskip("torchvision")  # slam_utils needs the GPU container env, not wm_env
 from vggt_slam.slam_utils import load_result_npz, save_result_npz
 
 

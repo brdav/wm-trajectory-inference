@@ -4,11 +4,11 @@ second (undistorted) copy of the frames to disk.
 Standard OpenCV Brown-Conrady model: distCoeffs = (k1, k2, p1, p2, k3). The remap tables only
 depend on a clip's resolution and known camera intrinsics -- not on any frame's pixel content --
 so they're computed once from just (width, height) via compute_undistort_maps(), and applied
-in-memory, per frame, via undistort_frame(). This lets a caller (main.py's keyframe-selection
+in-memory, per frame, via undistort_frame(). This lets a caller (vggt_slam/pipeline.py's keyframe-selection
 loop) undistort only the frames it actually keeps as keyframes, instead of every extracted frame.
 
 Used by scripts/batch_infer.py (computes+caches the maps once per recording session -- see
-session_cache_dir -- and main.py (loads the cached maps and applies them per selected keyframe).
+session_cache_dir -- and vggt_slam/pipeline.py (loads the cached maps and applies them per selected keyframe).
 """
 import os
 import threading
@@ -38,7 +38,7 @@ def compute_undistort_maps(width, height, fx, fy, cx, cy, k1=0.0, k2=0.0, k3=0.0
     alpha=0 crops to the largest all-valid-pixel rectangle (no black border pixels reach the SLAM
     backend). Returns (map1, map2, roi, new_intrinsics), where roi=(x, y, w, h) is the alpha crop
     and new_intrinsics = {"fx", "fy", "cx", "cy", "width", "height"} already accounts for it (so
-    it's directly usable as e.g. main.py's --fixed_intrinsics).
+    it's directly usable as e.g. vggt_slam/pipeline.py's --fixed_intrinsics).
     """
     K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
     dist = np.array([k1, k2, p1, p2, k3], dtype=np.float64)
