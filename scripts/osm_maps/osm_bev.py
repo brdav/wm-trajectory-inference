@@ -501,12 +501,132 @@ def way_layer(tags: dict) -> tuple[int, bool]:
     return max(-1, min(layer, 3)), tunnel
 
 
-def prepare(pbf: str, root: str, country: str, bbox=None, node_cache: str | None = None, prefilter=True):
+def _prefilter_pbf(pbf, work, bbox, prefilter):
+    """Shrink the extract with osmium-tool (clip to `bbox`, keep only the features the renderer draws). Returns the
+    path to read: a file in `work`, or `pbf` itself when osmium-tool is unavailable or disabled."""
+    if not (shutil.which("osmium") and prefilter):
+        print("WARNING: osmium-tool not used - processing the raw file (slow / memory hungry "
+              "for big countries).", file=sys.stderr)
+        return pbf
+    src = pbf
+    if bbox:
+        clipped = str(work / "clip.osm.pbf")
+        subprocess.run(["osmium", "extract", "-b", ",".join(map(str, bbox)), "-s", "smart",
+                        src, "-o", clipped, "--overwrite"], check=True)
+        src = clipped
+    filtered = str(work / "filtered.osm.pbf")
+    print("osmium tags-filter ...", flush=True)
+    subprocess.run(["osmium", "tags-filter", src, *TAG_FILTERS, "-o", filtered, "--overwrite"], check=True)
+    return filtered
+
+
+def _extract_features(src, sink, py_bbox, node_cache):
+    """Classify every node, way and area of `src` and add the drawn ones to `sink`. py_bbox: clip in Python
+    (only when osmium-tool could not). Returns the counts per kind."""
     import osmium
-    import pyarrow as pa
-    import pyarrow.dataset as ds
     import shapely
 
+    def road_extra(tags):
+        """JSON of the few extra road tags the renderer reads (EXTRA_ROAD_TAGS), '' if none are present."""
+        e = {k: tags[k] for k in EXTRA_ROAD_TAGS if k in tags}
+        return json.dumps(e, ensure_ascii=False, separators=(",", ":")) if e else ""
+
+    def outside(x0, y0, x1, y1):
+        return py_bbox is not None and (x1 < py_bbox[0] or x0 > py_bbox[2] or y1 < py_bbox[1] or y0 > py_bbox[3])
+
+    fac = osmium.geom.WKBFactory()
+    fp = osmium.FileProcessor(src)
+    fp = fp.with_locations(f"sparse_file_array,{node_cache}") if node_cache else fp.with_locations()
+    fp = fp.with_areas()
+    n = dict(node=0, way=0, area=0, bad=0)
+    for o in fp:
+        try:
+            if o.is_node():
+                if not o.tags:
+                    continue
+                tags = {t.k: t.v for t in o.tags}
+                c = classify_node(tags)
+                if c and not outside(o.location.lon, o.location.lat, o.location.lon, o.location.lat):
+                    sink.add(shapely.Point(o.location.lon, o.location.lat), *c, o.id,
+                             direction=direction_of(tags))
+                    n["node"] += 1
+            elif o.is_way():
+                tags = {t.k: t.v for t in o.tags}
+                c = classify_way(tags)
+                if not c:
+                    continue
+                geom = shapely.from_wkb(fac.create_linestring(o))
+                if outside(*geom.bounds):
+                    continue
+                layer, tunnel = way_layer(tags)
+                kind, cls, sub = c
+                lanes = parse_int(tags.get("lanes")) or (
+                    parse_int(tags.get("lanes:forward")) + parse_int(tags.get("lanes:backward")))
+                speed = way_speed_kmh(tags)
+                if not speed and cls == "living_street":
+                    speed = 20.0
+                sink.add(geom, kind, cls, sub, o.id, layer=layer, tunnel=tunnel,
+                         oneway=oneway_of(tags, cls) if kind == "road" else 0, lanes=min(lanes, 12),
+                         width=parse_width_m(tags.get("width")), maxspeed=speed,
+                         extra=road_extra(tags) if kind == "road" and cls not in NON_VEHICLE else "")
+                n["way"] += 1
+            elif o.is_area():
+                tags = {t.k: t.v for t in o.tags}
+                c = classify_area(tags)
+                if not c:
+                    continue
+                geom = shapely.from_wkb(fac.create_multipolygon(o))
+                if outside(*geom.bounds):
+                    continue
+                sink.add(geom, *c, o.orig_id())
+                n["area"] += 1
+        except (RuntimeError, ValueError, osmium.InvalidLocationError):
+            n["bad"] += 1
+    return n
+
+
+def _write_tiles(parts, out, tmp):
+    """Storage layout: ONE parquet file per 0.5-degree tile (<region>/tile_<tx>_<ty>.parquet), rows sorted by cell so
+    each 5 km cell is its own row group (the reader pushes a `cell == ...` filter down to row-group statistics).
+    (The first version wrote one directory + one file per 5 km cell: ~10^5 inodes for a big country.)
+    Reads the sink's `parts`, returns the number of tile files written to `out`; `tmp` is scratch."""
+    import pyarrow as pa
+    import pyarrow.dataset as ds
+    import pyarrow.parquet as pq
+
+    dset = ds.dataset(str(parts), format="parquet")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    part = ds.partitioning(pa.schema([("tile", pa.string())]), flavor="hive")
+    ds.write_dataset(dset, str(tmp), format="parquet", partitioning=part, max_partitions=1 << 20,
+                     max_open_files=256, basename_template="part-{i}.parquet")
+    out.mkdir(parents=True, exist_ok=True)
+    n_tiles = 0
+    for d in sorted(tmp.iterdir()):
+        t = pq.read_table(str(d)).sort_by("cell")               # write_dataset leaves the partition column out
+        writer = None
+        cells = t["cell"].to_pylist()
+        start = 0
+        for i in range(1, len(cells) + 1):
+            if i == len(cells) or cells[i] != cells[start]:
+                chunk = t.slice(start, i - start)
+                if writer is None:
+                    writer = pq.ParquetWriter(str(out / f"{d.name.replace('tile=', 'tile_')}.parquet"), chunk.schema,
+                                              compression="zstd")
+                writer.write_table(chunk, row_group_size=len(chunk))     # exactly one row group per cell
+                start = i
+        writer.close()
+        n_tiles += 1
+    shutil.rmtree(tmp)
+    try:
+        tmp.parent.rmdir()
+    except OSError:
+        pass
+    return n_tiles
+
+
+def prepare(pbf: str, root: str, country: str, bbox=None, node_cache: str | None = None, prefilter=True):
+    """PBF extract -> the renderer's tile files under <root>/<region>/ (one region = one country / US state)."""
     root_p = Path(root)
     out = root_p / region_dir(country)
     parts = root_p / "_parts" / region_dir(country)
@@ -515,120 +635,16 @@ def prepare(pbf: str, root: str, country: str, bbox=None, node_cache: str | None
     if out.exists():
         shutil.rmtree(out)
     work = Path(tempfile.mkdtemp(prefix="osm_bev_"))
-    src = pbf
     try:
-        if shutil.which("osmium") and prefilter:
-            if bbox:
-                clipped = str(work / "clip.osm.pbf")
-                subprocess.run(["osmium", "extract", "-b", ",".join(map(str, bbox)), "-s", "smart",
-                                src, "-o", clipped, "--overwrite"], check=True)
-                src = clipped
-            filtered = str(work / "filtered.osm.pbf")
-            print("osmium tags-filter ...", flush=True)
-            subprocess.run(["osmium", "tags-filter", src, *TAG_FILTERS, "-o", filtered, "--overwrite"],
-                           check=True)
-            src = filtered
-        else:
-            print("WARNING: osmium-tool not used - processing the raw file (slow / memory hungry "
-                  "for big countries).", file=sys.stderr)
-
+        src = _prefilter_pbf(pbf, work, bbox, prefilter)
         sink = Sink(parts)
-        def road_extra(tags):
-            """JSON of the few extra road tags the renderer reads (EXTRA_ROAD_TAGS), '' if none are present."""
-            e = {k: tags[k] for k in EXTRA_ROAD_TAGS if k in tags}
-            return json.dumps(e, ensure_ascii=False, separators=(",", ":")) if e else ""
-
-        py_bbox = bbox if (bbox and src == pbf) else None    # osmium-tool unavailable: clip in python
-
-        def outside(x0, y0, x1, y1):
-            return py_bbox is not None and (x1 < py_bbox[0] or x0 > py_bbox[2] or y1 < py_bbox[1] or y0 > py_bbox[3])
-
-        fac = osmium.geom.WKBFactory()
-        fp = osmium.FileProcessor(src)
-        fp = fp.with_locations(f"sparse_file_array,{node_cache}") if node_cache else fp.with_locations()
-        fp = fp.with_areas()
-        n = dict(node=0, way=0, area=0, bad=0)
-        for o in fp:
-            try:
-                if o.is_node():
-                    if not o.tags:
-                        continue
-                    tags = {t.k: t.v for t in o.tags}
-                    c = classify_node(tags)
-                    if c and not outside(o.location.lon, o.location.lat, o.location.lon, o.location.lat):
-                        sink.add(shapely.Point(o.location.lon, o.location.lat), *c, o.id,
-                                 direction=direction_of(tags))
-                        n["node"] += 1
-                elif o.is_way():
-                    tags = {t.k: t.v for t in o.tags}
-                    c = classify_way(tags)
-                    if not c:
-                        continue
-                    geom = shapely.from_wkb(fac.create_linestring(o))
-                    if outside(*geom.bounds):
-                        continue
-                    layer, tunnel = way_layer(tags)
-                    kind, cls, sub = c
-                    lanes = parse_int(tags.get("lanes")) or (
-                        parse_int(tags.get("lanes:forward")) + parse_int(tags.get("lanes:backward")))
-                    speed = way_speed_kmh(tags)
-                    if not speed and cls == "living_street":
-                        speed = 20.0
-                    sink.add(geom, kind, cls, sub, o.id, layer=layer, tunnel=tunnel,
-                             oneway=oneway_of(tags, cls) if kind == "road" else 0, lanes=min(lanes, 12),
-                             width=parse_width_m(tags.get("width")), maxspeed=speed,
-                             extra=road_extra(tags) if kind == "road" and cls not in NON_VEHICLE else "")
-                    n["way"] += 1
-                elif o.is_area():
-                    tags = {t.k: t.v for t in o.tags}
-                    c = classify_area(tags)
-                    if not c:
-                        continue
-                    geom = shapely.from_wkb(fac.create_multipolygon(o))
-                    if outside(*geom.bounds):
-                        continue
-                    sink.add(geom, *c, o.orig_id())
-                    n["area"] += 1
-            except (RuntimeError, ValueError, osmium.InvalidLocationError):
-                n["bad"] += 1
+        n = _extract_features(src, sink, bbox if (bbox and src == pbf) else None, node_cache)  # python clip if no osmium-tool
         sink.flush()
         print(f"{country}: {n}, skipped oversize={sink.skipped}, parts={sink.n_part}", flush=True)
-
         if sink.n_part == 0:
             raise SystemExit("no features extracted")
-        # Storage layout: ONE parquet file per 0.5-degree tile (<region>/tile_<tx>_<ty>.parquet), rows sorted by cell so
-        # each 5 km cell is its own row group (the reader pushes a `cell == ...` filter down to row-group statistics).
-        # (The first version wrote one directory + one file per 5 km cell: ~10^5 inodes for a big country.)
-        import pyarrow.parquet as pq
-        dset = ds.dataset(str(parts), format="parquet")
-        tmp = root_p / "_tiles" / region_dir(country)
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        part = ds.partitioning(pa.schema([("tile", pa.string())]), flavor="hive")
-        ds.write_dataset(dset, str(tmp), format="parquet", partitioning=part, max_partitions=1 << 20,
-                         max_open_files=256, basename_template="part-{i}.parquet")
-        out.mkdir(parents=True, exist_ok=True)
-        n_tiles = 0
-        for d in sorted(tmp.iterdir()):
-            t = pq.read_table(str(d)).sort_by("cell")               # write_dataset leaves the partition column out
-            writer = None
-            cells = t["cell"].to_pylist()
-            start = 0
-            for i in range(1, len(cells) + 1):
-                if i == len(cells) or cells[i] != cells[start]:
-                    chunk = t.slice(start, i - start)
-                    if writer is None:
-                        writer = pq.ParquetWriter(str(out / f"{d.name.replace('tile=', 'tile_')}.parquet"), chunk.schema,
-                                                  compression="zstd")
-                    writer.write_table(chunk, row_group_size=len(chunk))     # exactly one row group per cell
-                    start = i
-            writer.close()
-            n_tiles += 1
-        shutil.rmtree(tmp)
-        try:
-            tmp.parent.rmdir()
-        except OSError:
-            pass
+
+        n_tiles = _write_tiles(parts, out, root_p / "_tiles" / region_dir(country))
         print(f"{country}: {n_tiles} tile files", flush=True)
         shutil.rmtree(parts)
         try:
@@ -946,42 +962,60 @@ def shapely_parts(g):
     return shapely.get_parts(g)
 
 
-def draw_legend(res=0.1):
-    """Legend of everything the map images show, drawn with the renderer's own palette and drawing functions so it cannot
-    drift from the maps. Enlarged 5x vs the 0.5 m/px of the maps (res 0.1 m/px). Returns an RGB uint8 image."""
-    import shapely
-    px = 2560
-    cv = Canvas(px, res, 2, BG)
-    ink = COL["outline"]
-    cols = [-122.0, -52.0, 18.0]                      # left edge (m) of the 3 columns (70 m apart)
-    top = 122.0
-    P = lambda x, y: np.array([x, y], float)
-    cursor = [top] * 3
+class _Legend:
+    """Legend sheet: three columns of labelled samples, drawn with the renderer's own palette and drawing functions."""
+    PX = 2560
+    COLS = [-122.0, -52.0, 18.0]      # left edge (m) of the 3 columns (70 m apart)
+    TOP = 122.0
 
-    def head(ci, title):
+    def __init__(self, res):
+        self.res = res
+        self.cv = Canvas(self.PX, res, 2, BG)
+        self.ink = COL["outline"]
+        self.cursor = [self.TOP] * 3
+
+    @staticmethod
+    def P(x, y):
+        return np.array([x, y], float)
+
+    def head(self, ci, title):
+        import shapely
+        cv, cols, cursor = self.cv, self.COLS, self.cursor
         cursor[ci] -= 2.0
-        cv.text(P(cols[ci], cursor[ci]), title, 3.4, ink, anchor="l")
+        cv.text(self.P(cols[ci], cursor[ci]), title, 3.4, self.ink, anchor="l")
         cv.fill_geom(shapely.box(cols[ci], cursor[ci] - 3.4, cols[ci] + 62, cursor[ci] - 3.0), (150, 150, 150))
         cursor[ci] -= 8.0
 
-    def row(ci, label, drawer, pitch=9.0, sw=12.0):
-        y = cursor[ci]
-        drawer(cols[ci], y, sw)
-        cv.text(P(cols[ci] + sw + 3.0, y), label, 2.4, ink, anchor="l")
-        cursor[ci] -= pitch
+    def row(self, ci, label, drawer, pitch=9.0, sw=12.0):
+        y = self.cursor[ci]
+        drawer(self.COLS[ci], y, sw)
+        self.cv.text(self.P(self.COLS[ci] + sw + 3.0, y), label, 2.4, self.ink, anchor="l")
+        self.cursor[ci] -= pitch
 
-    def road(cls, tunnel=False):
+    def note(self, ci, lines, size=1.8, colour=(90, 90, 90), dy=0.0):
+        for ln in lines:
+            self.cv.text(self.P(self.COLS[ci], self.cursor[ci] + dy), ln, size, colour, anchor="l")
+            self.cursor[ci] -= 3.6
+
+    # drawers: functions (x, y, sample_width) that draw one sample
+    def road_drawer(self, cls, tunnel=False):
+        import shapely
+        cv = self.cv
         w = min(ROADS[cls][1], 7.0)
         col = np.array(ROADS[cls][2], float)
         if tunnel:
             col = 0.5 * col + 0.5 * np.array(BG)
+
         def d(x, y, sw):
             ln = shapely.LineString([(x, y), (x + sw, y)])
             cv.fill_geom(ln.buffer(w / 2 + 0.45, cap_style="flat"), COL["casing"])
             cv.fill_geom(ln.buffer(w / 2, cap_style="flat"), col)
         return d
 
-    def area(col, outline=None):
+    def area_drawer(self, col, outline=None):
+        import shapely
+        cv = self.cv
+
         def d(x, y, sw):
             b = shapely.box(x, y - 2.8, x + sw, y + 2.8)
             if outline:
@@ -989,93 +1023,119 @@ def draw_legend(res=0.1):
             cv.fill_geom(b, col)
         return d
 
-    # ---- column 0: roads -------------------------------------------------------------------------------------
-    head(0, "ROADS (fill colour = class)")
-    for lab, cls in [("Motorway", "motorway"), ("Motorway ramp", "motorway_link"), ("Trunk road", "trunk"),
-                     ("Primary road", "primary"), ("Secondary road", "secondary"), ("Tertiary road", "tertiary"),
-                     ("Residential / unclassified", "residential"), ("Living street", "living_street"), ("Service road", "service"),
-                     ("Pedestrian street", "pedestrian"), ("Track", "track"), ("Cycleway", "cycleway"), ("Footway", "footway"),
-                     ("Path", "path"), ("Steps", "steps"), ("Bridleway", "bridleway")]:
-        row(0, lab, road(cls))
-    row(0, "Tunnel (class colour, faded)", road("primary", tunnel=True))
-    cursor[0] -= 1.0
-    for ln in ("Width: tagged width, else lanes x 3 m,", "else the class default. A dark grey", "outline (casing) separates roads."):
-        cv.text(P(cols[0], cursor[0]), ln, 1.8, (90, 90, 90), anchor="l"); cursor[0] -= 3.6
+    def stripes_drawer(self, col):
+        import shapely
+        cv = self.cv
 
-    # ---- column 1: areas, markings ---------------------------------------------------------------------------------
-    head(1, "AREAS AND LINES")
-    for lab, col, ol in [("Background / unmapped", BG, (170, 170, 170)), ("Park, forest, grass", COL["green"], None),
-                         ("Water", COL["water"], None), ("Parking area", COL["parking"], None),
-                         ("Pedestrian area", COL["pedestrian"], None), ("Traffic island", COL["island"], None),
-                         ("Building", COL["building"], None)]:
-        row(1, lab, area(col, ol))
-    def rail(x, y, sw):
-        cv.fill_geom(shapely.LineString([(x, y), (x + sw, y)]).buffer(0.8, cap_style="flat"), COL["rail"])
-    row(1, "Railway / tram line", rail)
-    cursor[1] -= 2.0
-    head(1, "ROAD MARKINGS AND LABELS")
-    def oneway(x, y, sw):
-        for k in range(3):
-            q = P(x + 2.5 + 4.0 * k, y)
-            cv.fill_xy([q + P(2.6, 0), q + P(-1.8, 1.3), q + P(-1.8, -1.3)], COL["arrow"])
-    row(1, "One-way arrow", oneway)
-    def dashed(x, y, sw):
-        cv.fill_geom(shapely.box(x, y - 3.4, x + sw, y + 3.4), ROADS["secondary"][2])
-        for k in range(2):
-            col = tuple(int(v * 0.62) for v in ROADS["secondary"][2])
-            cv.fill_geom(shapely.box(x + 1.0 + 6.0 * k, y - 0.28, x + 4.0 + 6.0 * k, y + 0.28), col)
-    row(1, "Lane divider (dashed)", dashed)
-    def centre(x, y, sw):
-        cv.fill_geom(shapely.box(x, y - 3.4, x + sw, y + 3.4), ROADS["secondary"][2])
-        cv.fill_geom(shapely.box(x, y - 0.3, x + sw, y + 0.3), tuple(int(v * 0.62) for v in ROADS["secondary"][2]))
-    row(1, "Centre line, two-way road", centre)
-    row(1, "Speed limit, km/h (on road)", lambda x, y, sw: cv.text(P(x + sw / 2, y), "50", 3.4, COL["speed_map"], halo=True))
-    def stripes(col):
         def d(x, y, sw):
             for k in range(4):
                 cv.fill_geom(shapely.box(x + 1.0 + 3.0 * k, y - 3.0, x + 2.6 + 3.0 * k, y + 3.0), col)
         return d
-    row(1, "Crossing, with traffic signals", stripes(COL["cross_signals"]))
-    row(1, "Crossing, marked / zebra", stripes(COL["cross_marked"]))
-    row(1, "Crossing, other / unmarked", stripes(COL["cross_other"]))
-    cursor[1] -= 1.0
-    for ln in ("No number on a road = limit not", "mapped (nor copied from a touching", "road of the same class)."):
-        cv.text(P(cols[1], cursor[1]), ln, 1.8, (90, 90, 90), anchor="l"); cursor[1] -= 3.6
 
-    # ---- column 2: symbols, ego -------------------------------------------------------------------------------------
-    head(2, "SYMBOLS (always upright)")
-    cursor[2] -= 6.0
-    for lab, cls in [("Stop sign", "stop"), ("Give way", "give_way"), ("Traffic signals", "signals"), ("Bus stop", "bus_stop"),
-                     ("Level / tram crossing", "level_crossing"), ("Mini roundabout", "mini_roundabout"),
-                     ("Speed bump, hump, table", "calming")]:
-        row(2, lab, lambda x, y, sw, c=cls: draw_symbol(cv, c, P(x + sw / 2, y), 0.0), pitch=18.0, sw=16.0)
-    cursor[2] -= 1.0
-    head(2, "EGO VEHICLE")
-    cursor[2] -= 5.0
-    def chev(x, y, sw):
-        h, n = P(0, 1), P(-1, 0)
-        c0 = P(x + sw / 2, y)
-        for L, W, col in ((13.0, 8.4, COL["outline"]), (11.6, 7.2, COL["ego_ring"]), (9.8, 5.6, COL["ego"])):
-            L, W = L * 0.5, W * 0.5
-            cv.fill_xy([c0 + h * L, c0 - h * L * 0.7 + n * W, c0 - h * L * 0.25, c0 - h * L * 0.7 - n * W], col)
-    row(2, "Ego position and heading", chev, pitch=12.0)
-    y0 = cursor[2] - 2.0
-    t = np.linspace(0, 1, 51)
-    path = np.column_stack([cols[2] + 3.0 + 36.0 * t, y0 - 10.0 * np.sin(t * np.pi * 0.9)])
-    draw_trajectory(cv, path, ticks=(10, 20, 30, 40, 50))
-    cv.text(P(cols[2], y0 - 15.0), "Ego path of the next 5 s (drawn above", 1.8, (90, 90, 90), anchor="l")
-    cv.text(P(cols[2], y0 - 18.5), "roads and symbols): one dot per second,", 1.8, (90, 90, 90), anchor="l")
-    cv.text(P(cols[2], y0 - 22.0), "arrow = where the car is after 5 s.", 1.8, (90, 90, 90), anchor="l")
-    cursor[2] = y0 - 26.0
-    head(2, "NOTES")
-    for ln in ("Symbols and text here are 5x larger", "than in the images (0.5 m/px, 768 px).",
-               "Map orientation: heading up, ego at the", "image centre; right-hand traffic unless", "the region is Ireland or Japan (left).",
-               "Absence of a sign / limit / lane marking", "can mean 'not mapped', not 'none'."):
-        cv.text(P(cols[2], cursor[2] + 2.0), ln, 1.9, (60, 60, 60), anchor="l"); cursor[2] -= 3.6
-    img = cv.result()
-    low = min(cursor) - 6.0                                    # crop to the content
-    rows = int(min(px, (top + 6.0 - low) / res))
-    return img[: max(rows, 512)]
+    def roads(self):
+        """Column 0: road classes."""
+        self.head(0, "ROADS (fill colour = class)")
+        for lab, cls in [("Motorway", "motorway"), ("Motorway ramp", "motorway_link"), ("Trunk road", "trunk"),
+                         ("Primary road", "primary"), ("Secondary road", "secondary"), ("Tertiary road", "tertiary"),
+                         ("Residential / unclassified", "residential"), ("Living street", "living_street"), ("Service road", "service"),
+                         ("Pedestrian street", "pedestrian"), ("Track", "track"), ("Cycleway", "cycleway"), ("Footway", "footway"),
+                         ("Path", "path"), ("Steps", "steps"), ("Bridleway", "bridleway")]:
+            self.row(0, lab, self.road_drawer(cls))
+        self.row(0, "Tunnel (class colour, faded)", self.road_drawer("primary", tunnel=True))
+        self.cursor[0] -= 1.0
+        self.note(0, ("Width: tagged width, else lanes x 3 m,", "else the class default. A dark grey", "outline (casing) separates roads."))
+
+    def areas_and_markings(self):
+        """Column 1: areas, rail, road markings and labels."""
+        import shapely
+        cv, P = self.cv, self.P
+        self.head(1, "AREAS AND LINES")
+        for lab, col, ol in [("Background / unmapped", BG, (170, 170, 170)), ("Park, forest, grass", COL["green"], None),
+                             ("Water", COL["water"], None), ("Parking area", COL["parking"], None),
+                             ("Pedestrian area", COL["pedestrian"], None), ("Traffic island", COL["island"], None),
+                             ("Building", COL["building"], None)]:
+            self.row(1, lab, self.area_drawer(col, ol))
+
+        def rail(x, y, sw):
+            cv.fill_geom(shapely.LineString([(x, y), (x + sw, y)]).buffer(0.8, cap_style="flat"), COL["rail"])
+        self.row(1, "Railway / tram line", rail)
+        self.cursor[1] -= 2.0
+        self.head(1, "ROAD MARKINGS AND LABELS")
+
+        def oneway(x, y, sw):
+            for k in range(3):
+                q = P(x + 2.5 + 4.0 * k, y)
+                cv.fill_xy([q + P(2.6, 0), q + P(-1.8, 1.3), q + P(-1.8, -1.3)], COL["arrow"])
+        self.row(1, "One-way arrow", oneway)
+
+        def dashed(x, y, sw):
+            cv.fill_geom(shapely.box(x, y - 3.4, x + sw, y + 3.4), ROADS["secondary"][2])
+            for k in range(2):
+                col = tuple(int(v * 0.62) for v in ROADS["secondary"][2])
+                cv.fill_geom(shapely.box(x + 1.0 + 6.0 * k, y - 0.28, x + 4.0 + 6.0 * k, y + 0.28), col)
+        self.row(1, "Lane divider (dashed)", dashed)
+
+        def centre(x, y, sw):
+            cv.fill_geom(shapely.box(x, y - 3.4, x + sw, y + 3.4), ROADS["secondary"][2])
+            cv.fill_geom(shapely.box(x, y - 0.3, x + sw, y + 0.3), tuple(int(v * 0.62) for v in ROADS["secondary"][2]))
+        self.row(1, "Centre line, two-way road", centre)
+        self.row(1, "Speed limit, km/h (on road)", lambda x, y, sw: cv.text(P(x + sw / 2, y), "50", 3.4, COL["speed_map"], halo=True))
+        self.row(1, "Crossing, with traffic signals", self.stripes_drawer(COL["cross_signals"]))
+        self.row(1, "Crossing, marked / zebra", self.stripes_drawer(COL["cross_marked"]))
+        self.row(1, "Crossing, other / unmarked", self.stripes_drawer(COL["cross_other"]))
+        self.cursor[1] -= 1.0
+        self.note(1, ("No number on a road = limit not", "mapped (nor copied from a touching", "road of the same class)."))
+
+    def symbols_and_ego(self):
+        """Column 2: point symbols, the ego marker and path, notes."""
+        cv, P, cols, cursor = self.cv, self.P, self.COLS, self.cursor
+        self.head(2, "SYMBOLS (always upright)")
+        cursor[2] -= 6.0
+        for lab, cls in [("Stop sign", "stop"), ("Give way", "give_way"), ("Traffic signals", "signals"), ("Bus stop", "bus_stop"),
+                         ("Level / tram crossing", "level_crossing"), ("Mini roundabout", "mini_roundabout"),
+                         ("Speed bump, hump, table", "calming")]:
+            self.row(2, lab, lambda x, y, sw, c=cls: draw_symbol(cv, c, P(x + sw / 2, y), 0.0), pitch=18.0, sw=16.0)
+        cursor[2] -= 1.0
+        self.head(2, "EGO VEHICLE")
+        cursor[2] -= 5.0
+
+        def chev(x, y, sw):
+            h, n = P(0, 1), P(-1, 0)
+            c0 = P(x + sw / 2, y)
+            for L, W, col in ((13.0, 8.4, COL["outline"]), (11.6, 7.2, COL["ego_ring"]), (9.8, 5.6, COL["ego"])):
+                L, W = L * 0.5, W * 0.5
+                cv.fill_xy([c0 + h * L, c0 - h * L * 0.7 + n * W, c0 - h * L * 0.25, c0 - h * L * 0.7 - n * W], col)
+        self.row(2, "Ego position and heading", chev, pitch=12.0)
+        y0 = cursor[2] - 2.0
+        t = np.linspace(0, 1, 51)
+        path = np.column_stack([cols[2] + 3.0 + 36.0 * t, y0 - 10.0 * np.sin(t * np.pi * 0.9)])
+        draw_trajectory(cv, path, ticks=(10, 20, 30, 40, 50))
+        cv.text(P(cols[2], y0 - 15.0), "Ego path of the next 5 s (drawn above", 1.8, (90, 90, 90), anchor="l")
+        cv.text(P(cols[2], y0 - 18.5), "roads and symbols): one dot per second,", 1.8, (90, 90, 90), anchor="l")
+        cv.text(P(cols[2], y0 - 22.0), "arrow = where the car is after 5 s.", 1.8, (90, 90, 90), anchor="l")
+        cursor[2] = y0 - 26.0
+        self.head(2, "NOTES")
+        self.note(2, ("Symbols and text here are 5x larger", "than in the images (0.5 m/px, 768 px).",
+                      "Map orientation: heading up, ego at the", "image centre; right-hand traffic unless",
+                      "the region is Ireland or Japan (left).", "Absence of a sign / limit / lane marking",
+                      "can mean 'not mapped', not 'none'."), size=1.9, colour=(60, 60, 60), dy=2.0)
+
+    def image(self):
+        """RGB image, cropped to the content."""
+        img = self.cv.result()
+        low = min(self.cursor) - 6.0
+        rows = int(min(self.PX, (self.TOP + 6.0 - low) / self.res))
+        return img[: max(rows, 512)]
+
+
+def draw_legend(res=0.1):
+    """Legend of everything the map images show, drawn with the renderer's own palette and drawing functions so it cannot
+    drift from the maps. Enlarged 5x vs the 0.5 m/px of the maps (res 0.1 m/px). Returns an RGB uint8 image."""
+    legend = _Legend(res)
+    legend.roads()
+    legend.areas_and_markings()
+    legend.symbols_and_ego()
+    return legend.image()
 
 
 class MapRenderer:
@@ -1122,41 +1182,34 @@ class MapRenderer:
         return rows, found
 
     # ---- rendering ---------------------------------------------------------------------
-    def render(self, lat, lon, heading_deg=0.0, country=None, ego=False, oneway_arrows=True, trajectory=None,
-               ego_scale=None):
-        import shapely
-        from pyproj import Transformer
-        from shapely.strtree import STRtree
-
-        centre_region = None
+    def _regions_near(self, lat, lon, country):
+        """(region dirs to read, the region of the crop centre or None)."""
         if country:
-            countries = [country]
-        elif self.regions is not None:
-            near = self.regions.near(lat, lon, radius_m=self.half * math.sqrt(2) + 25.0)
-            countries = [region_dir(k) for k in near if region_dir(k) in self.countries]
-            centre_region = next((region_dir(k) for k in self.regions.near(lat, lon) if region_dir(k) in self.countries),
-                                 None)
-        else:
-            countries = self.countries
-        rows, found = self._query(lat, lon, countries)
-        country = country or centre_region or (found[0] if len(found) == 1 else None)
-        side = drive_side(country)
+            return [country], None
+        if self.regions is None:
+            return self.countries, None
+        near = self.regions.near(lat, lon, radius_m=self.half * math.sqrt(2) + 25.0)
+        countries = [region_dir(k) for k in near if region_dir(k) in self.countries]
+        centre_region = next((region_dir(k) for k in self.regions.near(lat, lon) if region_dir(k) in self.countries), None)
+        return countries, centre_region
 
-        # local frame: aeqd centred on car, rotated so heading points up (x right, y up)
+    @staticmethod
+    def _local_frame(lat, lon, heading_rad):
+        """Function mapping (lon, lat) arrays to metres in the frame centred on the car and rotated so the heading
+        points up (x right, y up): aeqd projection, then rotation."""
+        from pyproj import Transformer
         tr = Transformer.from_crs("EPSG:4326", f"+proj=aeqd +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m +no_defs",
                                   always_xy=True)
-        b = math.radians(heading_deg) if self.heading_up else 0.0
-        cb, sb = math.cos(b), math.sin(b)
+        cb, sb = math.cos(heading_rad), math.sin(heading_rad)
 
         def to_local(xy):
             e, n = tr.transform(xy[:, 0], xy[:, 1])
             return np.column_stack([e * cb - n * sb, e * sb + n * cb])
+        return to_local
 
-        geoms = shapely.transform(shapely.from_wkb(np.array([r["wkb"] for r in rows], dtype=object)), to_local) \
-            if rows else []
-        for r, g in zip(rows, geoms):
-            r["g"] = g
-
+    @staticmethod
+    def _group_rows(rows):
+        """Rows by kind: (areas by class, roads, crossing ways, rails, nodes)."""
         areas = {k: [] for k in AREA_PRIORITY}
         roads, crossings_way, rails, nodes = [], [], [], []
         for r in rows:
@@ -1171,25 +1224,30 @@ class MapRenderer:
                 rails.append(r)
             else:
                 nodes.append(r)
+        return areas, roads, crossings_way, rails, nodes
 
-        # road polygons ----------------------------------------------------------------
-        def road_width(r):
-            prio, dflt, _ = ROADS[r["cls"]]
-            if r["width"] > 0:
-                return float(r["width"])
-            if r["lanes"] > 0 and r["cls"] not in NON_VEHICLE:
-                return max(2.5, r["lanes"] * (3.25 if r["oneway"] else 3.0))
-            return max(1.0, dflt * 0.62) if (r["oneway"] and r["cls"] not in NON_VEHICLE) else dflt
+    @staticmethod
+    def _road_width(r):
+        prio, dflt, _ = ROADS[r["cls"]]
+        if r["width"] > 0:
+            return float(r["width"])
+        if r["lanes"] > 0 and r["cls"] not in NON_VEHICLE:
+            return max(2.5, r["lanes"] * (3.25 if r["oneway"] else 3.0))
+        return max(1.0, dflt * 0.62) if (r["oneway"] and r["cls"] not in NON_VEHICLE) else dflt
 
+    def _prepare_roads(self, roads):
+        """Width, polygon and drawing order of every road, lanes inferred. Returns the sorted layer levels."""
         for r in roads:
-            r["w"] = road_width(r)
+            r["w"] = self._road_width(r)
             r["poly"] = r["g"].buffer(r["w"] / 2, cap_style="round", quad_segs=3)
             r["level"] = r["layer"]
         roads.sort(key=lambda r: (r["level"], ROADS[r["cls"]][0]))
         levels = sorted({r["level"] for r in roads})
         infer_road_lanes(roads)
+        return levels
 
-        cv = Canvas(self.px, self.res, self.ss, BG)
+    def _draw_base(self, cv, areas, roads, rails, levels):
+        """Areas, then roads layer by layer (casings first -> clean junctions, lane marks right after their fill), rails."""
         for k in AREA_PRIORITY:
             for r in areas.get(k, []):
                 if k == "roadarea" and r["sub"] not in ROADS:
@@ -1198,7 +1256,7 @@ class MapRenderer:
                 cv.fill_geom(r["g"], color)
         for lv in levels:
             grp = [r for r in roads if r["level"] == lv]
-            for r in grp:                                   # casings first -> clean junctions
+            for r in grp:
                 if r["cls"] in NON_VEHICLE and r["w"] < 2.5:
                     continue
                 cv.fill_geom(r["g"].buffer(r["w"] / 2 + 0.45, cap_style="round", quad_segs=3), COL["casing"])
@@ -1207,34 +1265,38 @@ class MapRenderer:
                 if r["tunnel"]:
                     col = 0.5 * col + 0.5 * np.array(BG)
                 cv.fill_geom(r["poly"], col)
-                draw_lane_marks(cv, r, col, self.half)          # drawn right after its own fill: junctions stay clean
+                draw_lane_marks(cv, r, col, self.half)
         for r in rails:
             cv.fill_geom(r["g"].buffer(0.8, cap_style="flat"), COL["rail"])
 
-        # one-way arrows ------------------------------------------------------------------
-        if oneway_arrows:
-            for r in roads:
-                if not r["oneway"] or r["cls"] in NON_VEHICLE or r["w"] < 3.0:
+    def _draw_oneway_arrows(self, cv, roads):
+        import shapely
+        for r in roads:
+            if not r["oneway"] or r["cls"] in NON_VEHICLE or r["w"] < 3.0:
+                continue
+            for line in shapely.get_parts(r["g"]):
+                if line.geom_type != "LineString" or line.length < 8:
                     continue
-                for line in shapely.get_parts(r["g"]):
-                    if line.geom_type != "LineString" or line.length < 8:
+                for d in np.arange(10.0, line.length - 4.0, 22.0):
+                    p = np.array(line.interpolate(d).coords[0])
+                    if np.abs(p).max() > self.half + 5:
                         continue
-                    for d in np.arange(10.0, line.length - 4.0, 22.0):
-                        p = np.array(line.interpolate(d).coords[0])
-                        if np.abs(p).max() > self.half + 5:
-                            continue
-                        p2 = np.array(line.interpolate(min(d + 1.0, line.length)).coords[0])
-                        t = _unit(p2 - p) * (1 if r["oneway"] > 0 else -1)
-                        n = np.array([-t[1], t[0]])
-                        # multi-lane one-way road with lane dividers: one arrow per lane, like painted arrows
-                        lw = r["w"] / r["nl"] if r["nl"] >= 2 and lane_marks(r) else 0.0
-                        for off in ([(k + 0.5) * lw - r["w"] / 2 for k in range(r["nl"])] if lw else [0.0]):
-                            q = p + n * off
-                            hw = min(1.3, 0.36 * lw) if lw else 1.3          # arrow narrower than its lane
-                            L = 2.6 if not lw else 2.2
-                            cv.fill_xy([q + t * L, q - t * (L * 0.7) + n * hw, q - t * (L * 0.7) - n * hw], COL["arrow"])
+                    p2 = np.array(line.interpolate(min(d + 1.0, line.length)).coords[0])
+                    t = _unit(p2 - p) * (1 if r["oneway"] > 0 else -1)
+                    n = np.array([-t[1], t[0]])
+                    # multi-lane one-way road with lane dividers: one arrow per lane, like painted arrows
+                    lw = r["w"] / r["nl"] if r["nl"] >= 2 and lane_marks(r) else 0.0
+                    for off in ([(k + 0.5) * lw - r["w"] / 2 for k in range(r["nl"])] if lw else [0.0]):
+                        q = p + n * off
+                        hw = min(1.3, 0.36 * lw) if lw else 1.3          # arrow narrower than its lane
+                        L = 2.6 if not lw else 2.2
+                        cv.fill_xy([q + t * L, q - t * (L * 0.7) + n * hw, q - t * (L * 0.7) - n * hw], COL["arrow"])
 
-        # nodes: need road tangents -----------------------------------------------------
+    def _draw_nodes(self, cv, nodes, roads, crossings_way, side):
+        """Crossing stripes and the point symbols; symbols need the tangent of the nearest vehicle road."""
+        import shapely
+        from shapely.strtree import STRtree
+
         veh_parts = [(p, r) for r in roads if r["cls"] not in NON_VEHICLE
                      for p in shapely.get_parts(r["g"]) if p.geom_type == "LineString"]
         tree = STRtree([p for p, _ in veh_parts]) if veh_parts else None
@@ -1252,8 +1314,7 @@ class MapRenderer:
             return _unit(c - a), r["w"]
 
         for r in crossings_way:
-            col = COL[f"cross_{r['sub']}"]
-            cv.fill_geom(r["g"].buffer(1.6, cap_style="flat"), col)
+            cv.fill_geom(r["g"].buffer(1.6, cap_style="flat"), COL[f"cross_{r['sub']}"])
 
         ORDER = ["crossing", "bus_stop", "level_crossing", "mini_roundabout", "calming", "give_way", "stop", "signals"]
         for r in sorted(nodes, key=lambda r: ORDER.index(r["cls"]) if r["cls"] in ORDER else 0):
@@ -1282,12 +1343,9 @@ class MapRenderer:
                 continue                         # legacy rows (older prepared data): classes that are no longer drawn
             draw_symbol(cv, cls, c, r["maxspeed"], r["sub"])
 
-        # future ego trajectory: dict(lonlat=(N, 2) array, ticks=[indices]); drawn above roads, lane marks, arrows AND
-        # the symbols (at dense junctions the path would otherwise vanish under traffic lights), below labels / ego
-        if trajectory is not None:
-            draw_trajectory(cv, to_local(np.asarray(trajectory["lonlat"], float)), trajectory.get("ticks", ()))
-
-        # speed-limit labels (numbers; above the path so the limit along the route stays readable) -----------------------------------
+    def _draw_speed_labels(self, cv, roads, nodes):
+        """Speed-limit numbers along the roads, sliding along a road to dodge symbols and other labels."""
+        import shapely
         infer_road_speeds(roads)
         placed = []
         sym_pts = np.array([[n["g"].x, n["g"].y] for n in nodes if n["cls"] in DRAWN and n["cls"] not in ("crossing", "calming")
@@ -1301,7 +1359,7 @@ class MapRenderer:
                     continue
                 dists = [line.length / 2] if line.length < 100 else list(np.arange(30.0, line.length - 20.0, 90.0))
                 for d in dists:
-                    for shift in (0.0, 14.0, -14.0, 28.0, -28.0):     # slide along the road to dodge symbols
+                    for shift in (0.0, 14.0, -14.0, 28.0, -28.0):
                         dd = d + shift
                         if not 4.0 < dd < line.length - 4.0:
                             continue
@@ -1314,23 +1372,54 @@ class MapRenderer:
                         cv.text(pt, str(int(round(r["speed"]))), 5.4, col, halo=True)
                         break
 
-        if ego:
-            h = np.array([0.0, 1.0]) if self.heading_up else np.array([math.sin(math.radians(heading_deg)),
-                                                                       math.cos(math.radians(heading_deg))])
-            n = np.array([-h[1], h[0]])
-            # heading chevron: ~26 m long on its own so the ego pose is obvious; half that when a future path is drawn
-            # (a full-size chevron would hide the first second or two of a short path)
-            k = ego_scale if ego_scale is not None else (0.5 if trajectory is not None else 1.0)
-            for L, W, col in ((13.0, 8.4, COL["outline"]), (11.6, 7.2, COL["ego_ring"]), (9.8, 5.6, COL["ego"])):
-                L, W = L * k, W * k
-                cv.fill_xy([h * L, -h * L * 0.7 + n * W, -h * L * 0.25, -h * L * 0.7 - n * W], col)
+    def _draw_ego(self, cv, heading_deg, has_path, ego_scale):
+        """Heading chevron: ~26 m long on its own so the ego pose is obvious; half that when a future path is drawn
+        (a full-size chevron would hide the first second or two of a short path)."""
+        h = np.array([0.0, 1.0]) if self.heading_up else np.array([math.sin(math.radians(heading_deg)),
+                                                                   math.cos(math.radians(heading_deg))])
+        n = np.array([-h[1], h[0]])
+        k = ego_scale if ego_scale is not None else (0.5 if has_path else 1.0)
+        for L, W, col in ((13.0, 8.4, COL["outline"]), (11.6, 7.2, COL["ego_ring"]), (9.8, 5.6, COL["ego"])):
+            L, W = L * k, W * k
+            cv.fill_xy([h * L, -h * L * 0.7 + n * W, -h * L * 0.25, -h * L * 0.7 - n * W], col)
 
-        out = dict(image=cv.result(), meta=dict(
+    def render(self, lat, lon, heading_deg=0.0, country=None, ego=False, oneway_arrows=True, trajectory=None,
+               ego_scale=None):
+        """Render the ego-centred crop at (lat, lon) heading `heading_deg` (compass, clockwise from north).
+        trajectory: dict(lonlat=(N, 2) array, ticks=[indices]) of the future ego path to draw on top.
+        Returns dict(image=RGB array, meta=...)."""
+        import shapely
+
+        countries, centre_region = self._regions_near(lat, lon, country)
+        rows, found = self._query(lat, lon, countries)
+        country = country or centre_region or (found[0] if len(found) == 1 else None)
+        side = drive_side(country)
+
+        to_local = self._local_frame(lat, lon, math.radians(heading_deg) if self.heading_up else 0.0)
+        geoms = shapely.transform(shapely.from_wkb(np.array([r["wkb"] for r in rows], dtype=object)), to_local) \
+            if rows else []
+        for r, g in zip(rows, geoms):
+            r["g"] = g
+        areas, roads, crossings_way, rails, nodes = self._group_rows(rows)
+        levels = self._prepare_roads(roads)
+
+        cv = Canvas(self.px, self.res, self.ss, BG)
+        self._draw_base(cv, areas, roads, rails, levels)
+        if oneway_arrows:
+            self._draw_oneway_arrows(cv, roads)
+        self._draw_nodes(cv, nodes, roads, crossings_way, side)
+        # the future ego path is drawn above roads, lane marks, arrows AND the symbols (at dense junctions it would
+        # otherwise vanish under traffic lights), below the labels and the ego marker
+        if trajectory is not None:
+            draw_trajectory(cv, to_local(np.asarray(trajectory["lonlat"], float)), trajectory.get("ticks", ()))
+        self._draw_speed_labels(cv, roads, nodes)  # above the path so the limit along the route stays readable
+        if ego:
+            self._draw_ego(cv, heading_deg, trajectory is not None, ego_scale)
+
+        return dict(image=cv.result(), meta=dict(
             lat=lat, lon=lon, heading_deg=heading_deg, heading_up=self.heading_up, country=country,
             countries_with_data=found, drive_side=side, meters_per_px=self.res, px=self.px,
             half_extent_m=self.half, n_features=len(rows)))
-
-        return out
 
 
 # --------------------------------------------------------------------------------------
