@@ -111,3 +111,71 @@ class TestNormalizeRow:
     def test_idempotent(self):
         r = row("needs_scale_check", verdict="confirmed")
         assert U.normalize_row(r) == r
+
+
+class TestMetricScaleEntry:
+    qc = lambda self, route, **kw: dict(route=route, **kw)
+    depth = dict(ok=True, scale=2.0, scale_p25=1.9, scale_p75=2.1, scale_rel_iqr=0.05, n_frames_used=40)
+
+    def test_gps_scale_only(self):
+        entry, chk = U.metric_scale_entry(self.qc("use_fused"), 1.5, None, None, False)
+        assert entry == {"source": "gps_fusion", "scale": 1.5} and chk is None
+
+    def test_depth_wins_and_keeps_gps_for_comparison(self):
+        entry, _ = U.metric_scale_entry(self.qc("needs_metric_scale"), 1.5, self.depth, None, False)
+        assert entry["source"] == "metric_depth" and entry["scale"] == 2.0 and entry["gps_fusion_scale"] == 1.5
+
+    def test_transferred_scale_replaces_rerun_scale(self):
+        state = {"transferred": {"scale": 3.0, "scale_p25": 2.9, "scale_p75": 3.1, "resid_max_over_pathlen": 0.02}}
+        entry, _ = U.metric_scale_entry(self.qc("needs_metric_scale"), None, self.depth, state, False)
+        assert entry["scale"] == 3.0 and entry["scale_transferred"] and entry["transfer_residual"] == 0.02
+
+    def test_mismatched_rerun(self):
+        entry, _ = U.metric_scale_entry(self.qc("needs_metric_scale"), None, self.depth, None, True)
+        assert entry["reason"] == "rerun_poses_mismatch" and entry["status"] == "failed"
+        entry, _ = U.metric_scale_entry(self.qc("needs_metric_scale"), 1.5, self.depth, None, True)
+        assert entry == {"source": "gps_fusion", "scale": 1.5, "reason": "rerun_poses_mismatch"}
+
+    def test_not_attempted(self):
+        entry, _ = U.metric_scale_entry(self.qc("ego_failed"), None, None, None, False)
+        assert entry["status"] == "not_attempted" and entry["reason"] == "ego_failed"
+
+    def test_scale_check_contradicted_without_adjudication(self):
+        qc = self.qc("needs_scale_check", scale_reason="len_ratio_low", fused_over_gps_len=0.6)
+        entry, chk = U.metric_scale_entry(qc, 1.0, dict(self.depth, scale=3.0, scale_p25=2.9, scale_p75=3.1), None, False)
+        assert chk["verdict"] == "contradicted" and entry["status"] == "scale_contradicted"
+        assert entry["gps_fusion_scale"] == 1.0 and entry["depth_scale"] == 3.0
+
+    def test_scale_check_contradicted_but_gps_length_supports_fused(self):
+        qc = self.qc("needs_scale_check", scale_reason="map_match_error_high", fused_over_gps_len=1.0)
+        entry, chk = U.metric_scale_entry(qc, 1.0, dict(self.depth, scale=3.0, scale_p25=2.9, scale_p75=3.1), None, False)
+        assert chk["adjudication"] == "gps_length_supports_fused" and entry == {"source": "gps_fusion", "scale": 1.0}
+
+
+class TestUpdateRow:
+    def base(self):
+        return U.normalize_row({"clip_id": "x.mp4", "ok": True, "scale_check": {"verdict": "stale"}})
+
+    def test_qc_rejects_gps_scale(self):
+        r = self.base()
+        cat = U.update_row(r, dict(route="needs_metric_scale", scale_reason="longer_than_gps"), "v1", 1.5, None, None, False)
+        assert cat == "failed" and r["metric_scale"]["reason"] == "gps_scale_rejected_by_qc"
+        assert r["qc"]["version"] == "v1" and r["pose_source"] == "none"
+        assert "scale_check" not in r  # the stale cross-check is dropped
+
+    def test_use_fused_row(self):
+        r = self.base()
+        cat = U.update_row(r, dict(route="use_fused"), "v1", 1.5, None, None, False)
+        assert cat == "gps_fusion" and (r["pose_source"], r["pose_source_reason"]) == ("fused", "gps_fusion")
+
+    def test_row_without_qc_gets_no_pose_source(self):
+        r = {"clip_id": "x.mp4", "ok": True}  # as written by batch_infer, before normalize_row
+        U.update_row(r, None, "v1", None, None, None, False)
+        assert "qc" not in r and "pose_source" not in r and r["metric_scale"]["status"] == "not_attempted"
+
+    def test_write_provenance(self, tmp_path):
+        U.write_provenance(tmp_path / "qc_config.json", [{"pose_source": "fused"}], {"qc_version": "v1"},
+                           {"gps_fusion": 1})
+        import json
+        cfg = json.load(open(tmp_path / "qc_config.json"))
+        assert cfg["rows"] == 1 and cfg["pose_source_counts"] == {"fused": 1} and cfg["qc"] == {"qc_version": "v1"}

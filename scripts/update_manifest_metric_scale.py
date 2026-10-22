@@ -296,6 +296,135 @@ def metric_depth_entry(r):
     return {"source": None, "scale": None, "status": "failed", "reason": reason, "error": text}
 
 
+def metric_scale_entry(qc_row, gps, metric_rec, integ_state, mismatched):
+    """The `metric_scale` entry of one clip, plus its cross-check (None unless the QC route is needs_scale_check).
+    qc_row: the clip's clip_qc row (or None), gps: its GPS-fused scale (or None), metric_rec: its
+    estimate_metric_scale record (or None), integ_state: its integration status, mismatched: the depth rerun
+    did not reproduce the stored poses."""
+    route = (qc_row or {}).get("route")
+    chk = None
+    if route == "needs_scale_check":
+        chk = scale_check(gps, metric_rec, integ_state)
+        adj = adjudicate(chk, qc_row or {})
+        if adj:
+            chk["adjudication"] = adj
+        entry = ({"source": "gps_fusion", "scale": gps} if gps is not None else {"source": None, "scale": None})
+        if chk["verdict"] == "contradicted" and not adj:
+            entry = {"source": None, "scale": None, "status": "scale_contradicted", "reason": "scale_contradicted",
+                     "gps_fusion_scale": gps, "depth_scale": chk["depth_scale"]}
+    elif mismatched:
+        entry = {"source": None, "scale": None, "status": "failed", "reason": "rerun_poses_mismatch",
+                 "error": "rerun_poses_mismatch: SLAM rerun for the depth-based scale did not reproduce the stored poses"}
+        if gps is not None:
+            entry.update(source="gps_fusion", scale=gps, status=None, error=None)
+            entry = {k: v for k, v in entry.items() if v is not None or k in ("source", "scale")}
+    elif metric_rec is not None:
+        # a clip deliberately routed through estimate_metric_scale.py: its metric-depth scale wins; the GPS-fit
+        # scale (only exists for clips that still have fused_poses, e.g. no_route_match) is kept next to it
+        entry = metric_depth_entry(metric_rec)
+        tr = (integ_state or {}).get("transferred")
+        if tr and entry["source"] == "metric_depth":
+            # the scale was computed on a SLAM rerun whose gauge differed from the stored run: use the value
+            # transferred to the stored poses (what is in result.npz)
+            entry.update(scale=tr["scale"], scale_p25=tr["scale_p25"], scale_p75=tr["scale_p75"],
+                         scale_transferred=True, transfer_residual=tr["resid_max_over_pathlen"])
+        if gps is not None:
+            entry["gps_fusion_scale"] = gps
+    elif gps is not None:
+        entry = {"source": "gps_fusion", "scale": gps}
+    else:
+        # no GPS-fused scale and never sent to the depth step (e.g. SLAM failed): say so explicitly
+        entry = {"source": None, "scale": None, "status": "not_attempted", "reason": route or "no_scale_available"}
+    return entry, chk
+
+
+def update_row(r, qc_row, qc_version, gps, metric_rec, integ_state, mismatched):
+    """Set qc, metric_scale, scale_check and pose_source of one manifest row in place. Returns the row's
+    metric_scale category for the summary."""
+    r.pop("scale_check", None)  # recomputed for needs_scale_check rows; never keep a stale one
+    entry, chk = metric_scale_entry(qc_row, gps, metric_rec, integ_state, mismatched)
+    if chk is not None:
+        r["scale_check"] = chk
+    if qc_row is not None:
+        r["qc"] = dict(qc_row, version=qc_version)
+        if qc_row["route"] == "needs_metric_scale" and entry["source"] == "gps_fusion":
+            entry = {"source": None, "scale": None, "status": "gps_scale_rejected_by_qc",
+                     "reason": "gps_scale_rejected_by_qc", "gps_fusion_scale": entry["scale"]}
+    r["metric_scale"] = entry
+    if "qc" in r:
+        r["pose_source"], r["pose_source_reason"] = pose_source(r)
+    return entry["source"] or ("not_attempted" if entry.get("status") == "not_attempted" else
+                               "failed" if entry.get("status") else "none")
+
+
+def compute_gps_scales(rows, traj_root, workers, limit_sessions):
+    """GPS-fused scale per clip_id (fused/slam step-length ratio), read from the session zips."""
+    by_session = defaultdict(list)
+    for r in rows:
+        status = (r.get("gps_fusion") or {}).get("status")
+        if r.get("ok") and status in FUSED_STATUSES:
+            session, inner = split_clip_id(r["clip_id"])
+            if session:
+                by_session[session].append((r["clip_id"], inner))
+    sessions = sorted(by_session)[:limit_sessions]
+    print(f"{len(rows)} rows; computing GPS scale for {sum(len(by_session[s]) for s in sessions)} clips "
+          f"in {len(sessions)} session zips...", flush=True)
+    gps_scale = {}
+    with ProcessPoolExecutor(workers) as pool:
+        for i, res in enumerate(pool.map(gps_scales_for_session,
+                                         [(s, by_session[s], traj_root) for s in sessions], chunksize=8), 1):
+            gps_scale.update(res)
+            if i % 2000 == 0:
+                print(f"  {i}/{len(sessions)} sessions", flush=True)
+    return gps_scale
+
+
+def write_manifest(rows, manifest, out):
+    """Write the rows to `out`, or in place over `manifest` (after a timestamped backup). Returns the path."""
+    out_path = Path(out or manifest)
+    if out is None:
+        # a timestamped backup of whatever is being replaced, every time (never overwritten)
+        import datetime
+        bak = Path(f"{manifest}.bak_{datetime.datetime.now():%Y%m%dT%H%M%S}")
+        shutil.copy2(manifest, bak)
+        print(f"backup: {bak}")
+    tmp = out_path.with_name(out_path.name + f".tmp-{os.getpid()}")
+    with open(tmp, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    if out is None:
+        shutil.copymode(manifest, tmp)
+    os.replace(tmp, out_path)
+    print(f"wrote {out_path} ({len(rows)} rows)")
+    return out_path
+
+
+def write_provenance(path, rows, qc_cfg, summary):
+    """qc_config.json next to the manifest: how its qc / metric_scale / pose_source fields were made."""
+    import datetime
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    git = lambda *a: subprocess.run(["git", "-C", here, *a], capture_output=True, text=True).stdout.strip()
+    cfg = dict(created=datetime.datetime.now().isoformat(timespec="seconds"), manifest="manifest.jsonl",
+               rows=len(rows), qc=qc_cfg,
+               depth_scale=dict(script="scripts/estimate_metric_scale.py", model="depth-anything/DA3METRIC-LARGE",
+                                n_frames_requested=50, pcd_stride=3, process_res=504,
+                                agree_band=AGREE, contradicted_outside=CLEAR,
+                                confident_if=dict(min_frames=CONFIDENT_MIN_FRAMES, max_rel_iqr=CONFIDENT_MAX_REL_IQR),
+                                verdict_rules=dict(
+                                    high_confidence="judged on the median depth/GPS ratio",
+                                    low_confidence="contradicted only if the whole IQR of per-frame scales is outside the clear band; confirmed if the median is in the agree band; else ambiguous",
+                                    adjudication="a contradiction on a map_match_error_high clip is overruled when fused/GPS path length is within "
+                                                 f"[{SCALE_CHECK_LOW}, {SCALE_CHECK_HIGH}] (pose_source fused, reason gps_length_supports_fused)")),
+               pose_source_counts=dict(Counter(r["pose_source"] for r in rows if "pose_source" in r)),
+               metric_scale_source_counts=dict(summary),
+               manifest_script_git_commit=git("rev-parse", "HEAD"),
+               notes="see README.md, section 'Which poses to use (downstream)', and docs/manifest-schema.md")
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print(f"wrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", default=f"{TRAJ_ROOT}/manifest.jsonl")
@@ -321,118 +450,20 @@ def main():
     print(f"{len(mismatched)} clips without a usable depth scale (rerun trajectory differs from the stored one), "
           f"{sum(1 for v in integ.values() if v.get('transferred'))} clips with a scale transferred from the rerun")
 
-    by_session = defaultdict(list)
-    for r in rows:
-        status = (r.get("gps_fusion") or {}).get("status")
-        if r.get("ok") and status in FUSED_STATUSES:
-            session, inner = split_clip_id(r["clip_id"])
-            if session:
-                by_session[session].append((r["clip_id"], inner))
-    sessions = sorted(by_session)[:args.limit_sessions]
-    print(f"{len(rows)} rows; computing GPS scale for {sum(len(by_session[s]) for s in sessions)} clips "
-          f"in {len(sessions)} session zips...", flush=True)
-    gps_scale = {}
-    with ProcessPoolExecutor(args.workers) as pool:
-        for i, res in enumerate(pool.map(gps_scales_for_session,
-                                         [(s, by_session[s], args.traj_root) for s in sessions], chunksize=8), 1):
-            gps_scale.update(res)
-            if i % 2000 == 0:
-                print(f"  {i}/{len(sessions)} sessions", flush=True)
+    gps_scale = compute_gps_scales(rows, args.traj_root, args.workers, args.limit_sessions)
 
-    summary = Counter()
-    for r in rows:
-        cid = r["clip_id"]
-        r.pop("scale_check", None)  # recomputed below for needs_scale_check rows; never keep a stale one
-        route = (qc.get(cid) or {}).get("route")
-        if route == "needs_scale_check":
-            gps = gps_scale.get(cid)
-            r["scale_check"] = chk = scale_check(gps, metric.get(cid), integ.get(cid))
-            adj = adjudicate(chk, qc.get(cid) or {})
-            if adj:
-                chk["adjudication"] = adj
-            entry = ({"source": "gps_fusion", "scale": gps} if gps is not None else {"source": None, "scale": None})
-            if chk["verdict"] == "contradicted" and not adj:
-                entry = {"source": None, "scale": None, "status": "scale_contradicted", "reason": "scale_contradicted",
-                         "gps_fusion_scale": gps, "depth_scale": chk["depth_scale"]}
-        elif cid in mismatched:
-            entry = {"source": None, "scale": None, "status": "failed", "reason": "rerun_poses_mismatch",
-                     "error": "rerun_poses_mismatch: SLAM rerun for the depth-based scale did not reproduce the stored poses"}
-            if gps_scale.get(cid) is not None:
-                entry.update(source="gps_fusion", scale=gps_scale[cid], status=None, error=None)
-                entry = {k: v for k, v in entry.items() if v is not None or k in ("source", "scale")}
-        elif cid in metric:
-            # a clip deliberately routed through estimate_metric_scale.py: its metric-depth scale
-            # wins; the GPS-fit scale (only exists for clips that still have fused_poses, e.g.
-            # no_route_match) is kept next to it for comparison
-            entry = metric_depth_entry(metric[cid])
-            tr = (integ.get(cid) or {}).get("transferred")
-            if tr and entry["source"] == "metric_depth":
-                # scale was computed on a SLAM rerun whose gauge differed from the stored run: use
-                # the value transferred to the stored poses (what is in result.npz)
-                entry.update(scale=tr["scale"], scale_p25=tr["scale_p25"], scale_p75=tr["scale_p75"],
-                             scale_transferred=True, transfer_residual=tr["resid_max_over_pathlen"])
-            if gps_scale.get(cid) is not None:
-                entry["gps_fusion_scale"] = gps_scale[cid]
-        elif cid in gps_scale and gps_scale[cid] is not None:
-            entry = {"source": "gps_fusion", "scale": gps_scale[cid]}
-        else:
-            # no GPS-fused scale and never sent to the depth step (e.g. SLAM failed): say so explicitly
-            entry = {"source": None, "scale": None, "status": "not_attempted",
-                     "reason": (qc.get(cid) or {}).get("route") or "no_scale_available"}
-        if qc.get(cid) is not None:
-            r["qc"] = dict(qc[cid], version=qc_cfg.get("qc_version"))
-            if qc[cid]["route"] == "needs_metric_scale" and entry["source"] == "gps_fusion":
-                entry = {"source": None, "scale": None, "status": "gps_scale_rejected_by_qc",
-                         "reason": "gps_scale_rejected_by_qc", "gps_fusion_scale": entry["scale"]}
-        r["metric_scale"] = entry
-        if "qc" in r:
-            r["pose_source"], r["pose_source_reason"] = pose_source(r)
-        summary[entry["source"] or ("not_attempted" if entry.get("status") == "not_attempted" else
-                                    "failed" if entry.get("status") else "none")] += 1
+    summary = Counter(
+        update_row(r, qc.get(r["clip_id"]), qc_cfg.get("qc_version"), gps_scale.get(r["clip_id"]),
+                   metric.get(r["clip_id"]), integ.get(r["clip_id"]), r["clip_id"] in mismatched)
+        for r in rows)
     rows = [normalize_row(r) for r in rows]
     print("metric_scale source counts:", dict(summary))
     if args.dry_run:
         return
 
-    out_path = Path(args.out or args.manifest)
-    if args.out is None:
-        # a timestamped backup of whatever is being replaced, every time (never overwritten)
-        import datetime
-        bak = Path(f"{args.manifest}.bak_{datetime.datetime.now():%Y%m%dT%H%M%S}")
-        shutil.copy2(args.manifest, bak)
-        print(f"backup: {bak}")
-    tmp = out_path.with_name(out_path.name + f".tmp-{os.getpid()}")
-    with open(tmp, "w") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
-    if args.out is None:
-        shutil.copymode(args.manifest, tmp)
-    os.replace(tmp, out_path)
-    print(f"wrote {out_path} ({len(rows)} rows)")
+    out_path = write_manifest(rows, args.manifest, args.out)
     if args.out is None and qc_cfg:
-        # one provenance file next to the manifest: how its qc / metric_scale / pose_source fields were made
-        import datetime
-        import subprocess
-        here = os.path.dirname(os.path.abspath(__file__))
-        git = lambda *a: subprocess.run(["git", "-C", here, *a], capture_output=True, text=True).stdout.strip()
-        cfg = dict(created=datetime.datetime.now().isoformat(timespec="seconds"), manifest="manifest.jsonl",
-                   rows=len(rows), qc=qc_cfg,
-                   depth_scale=dict(script="scripts/estimate_metric_scale.py", model="depth-anything/DA3METRIC-LARGE",
-                                    n_frames_requested=50, pcd_stride=3, process_res=504,
-                                    agree_band=AGREE, contradicted_outside=CLEAR,
-                                    confident_if=dict(min_frames=CONFIDENT_MIN_FRAMES, max_rel_iqr=CONFIDENT_MAX_REL_IQR),
-                                    verdict_rules=dict(
-                                        high_confidence="judged on the median depth/GPS ratio",
-                                        low_confidence="contradicted only if the whole IQR of per-frame scales is outside the clear band; confirmed if the median is in the agree band; else ambiguous",
-                                        adjudication="a contradiction on a map_match_error_high clip is overruled when fused/GPS path length is within "
-                                                     f"[{SCALE_CHECK_LOW}, {SCALE_CHECK_HIGH}] (pose_source fused, reason gps_length_supports_fused)")),
-                   pose_source_counts=dict(Counter(r["pose_source"] for r in rows if "pose_source" in r)),
-                   metric_scale_source_counts=dict(summary),
-                   manifest_script_git_commit=git("rev-parse", "HEAD"),
-                   notes="see README.md, section 'Which poses to use (downstream)', and docs/manifest-schema.md")
-        with open(out_path.with_name("qc_config.json"), "w") as f:
-            json.dump(cfg, f, indent=2)
-        print(f"wrote {out_path.with_name('qc_config.json')}")
+        write_provenance(out_path.with_name("qc_config.json"), rows, qc_cfg, summary)
 
 
 if __name__ == "__main__":
