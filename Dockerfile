@@ -160,15 +160,9 @@ RUN pip install --no-cache-dir pyproj shapely
 # made that runtime install unreliable, and it added real startup latency to every single job.
 RUN pip install --no-cache-dir osmium
 
-# CUDA-enabled OpenCV (replaces the CPU-only opencv-python wheel stripped from requirements.txt
-# above): vggt_slam/frame_overlap.py's per-frame keyframe-selection tracking (goodFeaturesToTrack
-# + calcOpticalFlowPyrLK, both CPU/imgproc+video today) was found to cost about as much wall-clock
-# per clip as VGGT-SLAM's own GPU forward pass -- confirmed via live batch profiling: 38% of
-# per-frame time in keyframe selection vs. 34% in the actual model. GH200 (sm_90) has a dedicated
-# optical-flow hardware block separate from the CUDA cores the model itself uses, so offloading
-# this there should free the CPU without adding GPU contention (unlike just adding more GPU
-# worker processes, which was tried and made things WORSE -- CPU contention from duplicating this
-# same CPU-bound work outweighed any parallelism gained).
+# CUDA-enabled OpenCV (replaces the CPU-only opencv-python wheel stripped from requirements.txt above) so
+# vggt_slam/frame_overlap.py's keyframe-selection tracking can run on the GPU's optical-flow hardware
+# (rationale and profiling: memory/performance-investigations.md).
 #
 # Built in-place (no separate wheel artifact the way open3d's stage produces one -- OpenCV's own
 # CMake install target places the compiled cv2 extension directly into PYTHON3_PACKAGES_PATH) and

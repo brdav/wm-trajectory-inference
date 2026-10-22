@@ -20,8 +20,7 @@ original result.npz), scale, per-frame scales and quality stats. Already-done cl
 so an interrupted run can simply be rerun. One line per clip goes to <pipeline_dir>/manifest_metric_scale.jsonl
 (the durable record; the work files only feed integrate_metric_scale.py and can be deleted afterwards).
 
-Validated on 5 clips with GPS: metric-depth scale within about +-8% of the GPS-derived scale
-(no systematic bias). Treat scale as ~+-10% accurate.
+Treat the scale as ~+-10% accurate (validation: memory/qc-validation.md).
 
 Run inside the container, e.g.:
     srun --environment=vggtslam_env python3 scripts/estimate_metric_scale.py \\

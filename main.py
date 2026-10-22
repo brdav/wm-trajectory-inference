@@ -26,9 +26,9 @@ from vggt_slam.map_match import trim_osm_network_cache
 
 parser = argparse.ArgumentParser(description="VGGT-SLAM demo")
 parser.add_argument("--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images")
-parser.add_argument("--model_backend", type=str, default="da3", choices=["vggt", "da3"], help="Feed-forward geometry model to use: VGGT (original) or Depth Anything 3. Default da3, since DA3-GIANT-1.1 outperformed VGGT on GPS-fit trajectory error across all three natix clips tested (see conversation notes / gps_fit_*.png)")
-parser.add_argument("--da3_checkpoint", type=str, default="depth-anything/DA3-GIANT-1.1", help="DA3 checkpoint: a local directory or a Hugging Face repo id. Only used when --model_backend da3. Default DA3-GIANT-1.1 (plain any-view, no metric claim) -- DA3NESTED-GIANT-LARGE-1.1's 'metric' scale was empirically unreliable (1.3x-4x off) and DA3-GIANT-1.1's trajectory shape was more accurate anyway once fairly scale-fit")
-parser.add_argument("--use_ray_pose", action=argparse.BooleanOptionalAction, default=True, help="Passed through to DepthAnything3.inference: use ray-based pose estimation instead of the camera decoder. Default on, since it's a prerequisite for vggt_slam/da3_ray_pose_patch.py's --fixed_intrinsics/--shared_intrinsics support (fitting rotation directly against the known/consensus K instead of DA3's own free per-frame estimate); pass --no-use_ray_pose to fall back to the camera decoder. Only used when --model_backend da3")
+parser.add_argument("--model_backend", type=str, default="da3", choices=["vggt", "da3"], help="Feed-forward geometry model to use: VGGT (original) or Depth Anything 3. Default da3 (see memory/backend-choice.md)")
+parser.add_argument("--da3_checkpoint", type=str, default="depth-anything/DA3-GIANT-1.1", help="DA3 checkpoint: a local directory or a Hugging Face repo id. Only used when --model_backend da3. Default DA3-GIANT-1.1 (plain any-view, no metric claim; see memory/backend-choice.md)")
+parser.add_argument("--use_ray_pose", action=argparse.BooleanOptionalAction, default=True, help="Passed through to DepthAnything3.inference: use ray-based pose estimation instead of the camera decoder. Default on: required by vggt_slam/da3_ray_pose_patch.py's --fixed_intrinsics/--shared_intrinsics support; pass --no-use_ray_pose to fall back to the camera decoder. Only used when --model_backend da3")
 parser.add_argument("--ref_view_strategy", type=str, default="saddle_balanced", choices=["first", "middle", "saddle_balanced", "saddle_sim_range"], help="Passed through to DepthAnything3.inference: strategy for selecting the reference view from multiple views. Only used when --model_backend da3")
 parser.add_argument("--vis_map", action="store_true", help="Visualize point cloud in viser as it is being build, otherwise only show the final map")
 parser.add_argument("--headless", action="store_true", help="Skip the viser viewer entirely -- no server, no point-cloud/pose pushes at all. For batch runs where nobody watches it; overrides --vis_map.")
@@ -475,29 +475,12 @@ def run_video(args, backend, device, clip_model=None, clip_preprocess=None, clip
                                        matched_line=matched_line, snapped=snapped,
                                        gps_fusion_info=gps_fusion_info)
             except ValueError as e:
-                # align_trajectory_to_roads raises these specific, expected precondition
-                # failures rather than ever returning normally with region_used=None (an earlier
-                # version of the code above had a now-removed elif branch for that case, which
-                # was actually unreachable) -- give each its own structured status, same as
-                # scripts/tools/refuse_gps.py's matching except-ValueError branch, instead of burying
-                # them in the generic "failed" bucket below where only a traceback grep
-                # distinguishes them. Confirmed this was previously happening at real scale:
-                # ~72% of all "failed" gps_fusion records in one manifest.jsonl audit were
-                # actually one of the first two messages below.
+                # Expected precondition failures of align_trajectory_to_roads get their own structured status instead of the
+                # generic "failed" bucket (rationale: memory/gps-fusion-notes.md); same ladder as scripts/tools/refuse_gps.py.
                 if "no roads found near the GPS fixes" in str(e):
                     gps_fusion_info = {"status": "no_roads_in_any_region", "error": str(e)}
                 elif "raw-GPS map-match unavailable" in str(e):
-                    # align_trajectory_to_roads's own message already distinguishes WHY via
-                    # "matched_line=found"/"matched_line=none" -- split into two statuses instead
-                    # of lumping both under one, since they're different root causes: "found" means
-                    # a route WAS matched but too few keyframes fall in that time window (a data-
-                    # sparsity issue, same family as no_real_gps_fixes/insufficient_gps_matches --
-                    # confirmed on real clips: typically only 2-16 real GPS fixes), while "none"
-                    # means no plausible route through the road network was found at all for the
-                    # raw GPS trace (a mix of also-sparse clips and a smaller tail of clips with
-                    # PLENTY of good GPS data that still can't be routed -- confirmed on one real
-                    # clip: 53/53 real fixes, realistic speed, 13m accuracy, still no match -- a
-                    # genuine map-matching/road-network limitation worth its own bucket to find).
+                    # "matched_line=found": a route matched but too few keyframes fall in its time window; "none": no plausible route.
                     if "matched_line=found" in str(e):
                         gps_fusion_info = {"status": "no_raw_gps_route_too_sparse", "error": str(e)}
                     else:
@@ -505,25 +488,13 @@ def run_video(args, backend, device, clip_model=None, clip_preprocess=None, clip
                 elif "implausible GPS-derived scale" in str(e):
                     gps_fusion_info = {"status": "implausible_gps_scale", "error": str(e)}
                 elif "No real GPS fixes" in str(e):
-                    # vggt_slam.gps.load_gps_fixes: every row in this clip's sensor log is 'na' --
-                    # a genuine data-quality issue with that clip (nothing to fix in code), not a
-                    # bug. Confirmed at dataset scale: this alone was 70.9% of all "failed"
-                    # gps_fusion records in one manifest.jsonl audit.
+                    # Every row of the clip's sensor log is 'na'.
                     gps_fusion_info = {"status": "no_real_gps_fixes", "error": str(e)}
                 elif "keyframe(s) matched to a GPS fix" in str(e):
-                    # align_trajectory_to_roads's own len(matches) < 2 precondition: real GPS
-                    # fixes exist, but fewer than 2 landed within max_dt of an actual keyframe --
-                    # too sparse to fit a scale at all, distinct from "no_raw_gps_route_*" (which
-                    # has >=2 matches but no matchable route) or "implausible_gps_scale" (which
-                    # has >=2 matches but a degenerate/wrong fit). 20.2% of the same audit above.
+                    # Fewer than 2 keyframes within max_dt of a real GPS fix.
                     gps_fusion_info = {"status": "insufficient_gps_matches", "error": str(e)}
                 elif "distinct timestamp(s)" in str(e):
-                    # vggt_slam.gps.load_gps_fixes: fewer than 2 distinct wall-clock timestamps
-                    # in the sensor log -- can't fit a native-fps line at all. Confirmed on 268
-                    # real clips, every single one with exactly 1 sensor-log row for the whole
-                    # clip (a natix logging gap, not a code bug) -- previously surfaced as an
-                    # opaque numpy.linalg.LinAlgError ("SVD did not converge") before this
-                    # precondition check existed, all lumped into the generic "failed" bucket.
+                    # Fewer than 2 distinct timestamps in the sensor log.
                     gps_fusion_info = {"status": "gps_log_too_short", "error": str(e)}
                 else:
                     gps_fusion_info = {"status": "failed", "error": traceback.format_exc()}

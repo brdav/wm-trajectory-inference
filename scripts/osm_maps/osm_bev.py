@@ -128,11 +128,8 @@ RAIL = {"rail", "light_rail", "tram", "narrow_gauge"}
 AREA_PRIORITY = ["green", "water", "parking", "pedestrian", "island", "roadarea", "building"]
 
 _END = r"(\[|[;,\s]|$)"
-# traffic_sign is free text with country prefixes, so only the two classes whose national codes could be VALIDATED are
-# mapped. a co-tag check (script since removed) compared every code against the core OSM tags on the same nodes: each code below is
-# co-tagged highway=stop / give_way on 45-100% of its nodes (IT:II.37 / II.36 the lowest at 45% / 49%) and on ~0% with the
-# opposite class. Everything else in traffic_sign (no-entry, warning, priority-road, no-parking, city-limit, speed
-# limits, ...) is deliberately NOT drawn: those depend on per-country codes that cannot be validated this way.
+# traffic_sign is free text with country prefixes, so only the two classes whose national codes could be validated are
+# mapped; everything else is deliberately NOT drawn (validation: memory/osm-bev-tag-reliability.md).
 SIGN_PATTERNS = [
     (r"(^|[;,\s])(stop|DE:206|US:R1-1|FR:AB4|CH:3\.01|SE:B2|PL:B-20|IT:II\.37|ES:R-?2|JP:330[-\w.]*)" + _END, "stop"),
     (r"(^|[;,\s])(give_way|DE:205|US:R1-2|FR:AB3a|CH:3\.02|SE:B1|PL:A-7|IT:II\.36|ES:R-?1)" + _END, "give_way"),
@@ -838,10 +835,8 @@ def infer_road_speeds(roads):
 
     1. 'map'      : the limit is tagged in OSM.
     2. 'inferred' : a same-class road touching this one at an endpoint has a limit (limits of a road continue; lowest
-                    neighbour wins; repeated so a chain of untagged ways gets filled). In a hold-out test on roads with
-                    mapped limits this was right (within 3 km/h) for 79-96% of roads in CH/IT/ES/SE/PL.
-    Everything else stays without a number: statutory defaults (tested with a script since removed) were dropped
-    because on residential streets they are right only 6-85% of the time (many streets are 30 zones)."""
+                    neighbour wins; repeated so a chain of untagged ways gets filled).
+    Everything else stays without a number: statutory defaults are not used (memory/osm-bev-tag-reliability.md)."""
     for r in roads:
         r["speed"], r["src"] = float(r["maxspeed"]), ("map" if r["maxspeed"] > 0 else None)
     touch = link_roads(roads)
@@ -869,8 +864,7 @@ def infer_road_lanes(roads, agree=True):
     2. 'neighbour' : touching roads of the same class and same one-way-ness that have a lane count (counts continue
                      along a road; repeated so chains get filled). With agree=True the count is only taken when ALL such
                      neighbours report the same number; agree=False takes the most common one.
-    Everything else stays unknown (nl = 0): a default count (1 lane one-way / 2 two-way) was tested and dropped, it
-    was right only 36-90% of the time and its only visible effect was a guessed centre line."""
+    Everything else stays unknown (nl = 0): no default count (memory/osm-bev-tag-reliability.md)."""
     touch = link_roads(roads)
     for r in roads:
         r["nl"] = int(r["lanes"]) if r["lanes"] > 0 else 0

@@ -64,24 +64,17 @@ TRAJ_ROOT = Path("/capstor/store/cscs/swissai/ab036/processed_datasets/natix/tra
 DATASET_ROOT = Path("/capstor/store/cscs/swissai/ab036/datasets/natix")
 
 QC_VERSION = "2026-10-21.1"  # bump whenever a threshold or routing rule below changes
+# Evidence behind each threshold: memory/qc-thresholds-rationale.md
 MIN_KEYFRAMES = 4
-SLAM_JUMP_RATIO = 50.0     # step / typical step; typical = max(median, 0.25 * p90). Normal clips:
-                           # p99 of max-step ratio is ~27, 0.43% of clips exceed 50
+SLAM_JUMP_RATIO = 50.0     # step / typical step; typical = max(median, 0.25 * p90)
 SLAM_RUN_RATIO = 10.0      # ...or SLAM_RUN_LEN consecutive steps above this: catches a sustained
-SLAM_RUN_LEN = 6           # divergence whose individual steps stay under SLAM_JUMP_RATIO (e.g. a
-                           # clip that only blows up in its last seconds)
+SLAM_RUN_LEN = 6           # divergence whose individual steps stay under SLAM_JUMP_RATIO
 SCALE_WINDOW_S = 5.0       # window for the implied-speed check (= one 121-frame sample)
-SCALE_MAX_MPS = 50.0       # 180 km/h; p99.9 of 5 s window speed over the dataset is ~41 m/s
-SCALE_MAX_GPS_RATIO = 1.5  # fused path length / raw GPS path length over the GPS time span (hard limit;
-                           # was 2.0 -- in a spot check, 17 of 38 passed clips with a ratio of 1.5-2 had a
-                           # depth-based scale that clearly disagreed)
+SCALE_MAX_MPS = 50.0       # 180 km/h
+SCALE_MAX_GPS_RATIO = 1.5  # fused path length / raw GPS path length over the GPS time span (hard limit)
 SCALE_CHECK_LOW = 0.8      # passes the hard checks but the ratio is outside [LOW, HIGH] (or could not be
-SCALE_CHECK_HIGH = 1.25    # computed): route needs_scale_check -> cross-checked with a depth-based scale.
-                           # Typical clips sit at 0.92-1.05; below 0.8 about half the spot-checked clips
-                           # disagreed with the depth scale
-MAP_MATCH_CHECK_M = 10.0   # fused path's mean distance to its map-matched road above this: cross-check the
-                           # scale with a depth estimate (needs_scale_check). In a spot check, 17 of 46 QC-passed
-                           # clips above 10 m clearly disagreed with the depth scale, vs 7% below 5 m
+SCALE_CHECK_HIGH = 1.25    # computed): route needs_scale_check -> cross-checked with a depth-based scale
+MAP_MATCH_CHECK_M = 10.0   # fused path's mean distance to its map-matched road above this: needs_scale_check
 STATIC_MAX_GPS_EXTENT_M = 30.0  # a clip with < MIN_KEYFRAMES keyframes whose raw GPS fixes span less than this
                            # barely moved (SLAM rarely adds keyframes without motion): route static, not ego_failed
 SCALE_MIN_GPS_LEN_M = 30.0  # below this the GPS length is jitter-dominated, skip the ratio

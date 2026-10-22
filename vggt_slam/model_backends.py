@@ -68,9 +68,8 @@ def _da3_reprojection_match_ratio(depth, conf, extrinsic, intrinsic, conf_percen
     estimated depth+pose and checks what fraction land in-bounds and
     depth-consistent in the retrieved frame (index 1) -- i.e. whether DA3's
     own 2-view reconstruction is geometrically self-consistent, which it
-    usually isn't for two unrelated images. Not empirically calibrated against
-    the VGGT-fork's learned ratio -- `--lc_thres`/the loop-closure acceptance
-    threshold may need separate tuning when using this backend.
+    usually isn't for two unrelated images. Not calibrated against the VGGT fork's
+    learned ratio, see memory/backend-choice.md.
     """
     H, W = depth.shape[1:3]
     K0, K1 = intrinsic[0], intrinsic[1]

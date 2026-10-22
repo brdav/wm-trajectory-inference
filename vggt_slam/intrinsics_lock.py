@@ -5,7 +5,7 @@ K, but each backend model estimates K independently per submap chunk and per
 loop-closure pair -- with no consistency constraint between estimates. That
 lets ordinary model noise masquerade as frame-to-frame K drift, which then
 leaks into point-cloud unprojection, inter-submap scale estimation, and GPS
-fusion (see conversation notes / README).
+fusion (see memory/backend-choice.md).
 
 IntrinsicsLock gives Solver two modes:
   - fixed_intrinsics=<K>: the calibration is already known -- use it for every

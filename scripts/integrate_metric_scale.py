@@ -12,9 +12,8 @@ purpose: fused_poses are GPS/road grounded, these come from monocular metric dep
 
 Safety (the zips are shared, archival and not otherwise backed up):
   * the scale was computed on a SLAM *rerun* with fixed camera intrinsics. It is bit-identical to the stored run
-    (100 of 100 control clips, and ~99.6% of all clips) except for clips the ORIGINAL run processed with
-    self-calibration instead, because of a race in the undistortion cache (fixed in b722ac4); for those the
-    rerun's SLAM gauge differs by 0-20%. Checked per clip, not assumed:
+    except for clips the ORIGINAL run processed with self-calibration instead, because of a race in the
+    undistortion cache (fixed in b722ac4; see memory/manifest-and-scale-history.md). Checked per clip, not assumed:
       - same frame_ids and poses (atol 1e-6): scale applies as is;
       - same frame_ids, poses differ only by an arbitrary SLAM gauge (rerun ~= similarity of stored,
         max residual <= MAX_ALIGN_RESID of the path length): the scale is TRANSFERRED to the stored

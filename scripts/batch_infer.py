@@ -45,7 +45,7 @@ Architecture (see conversation / README for the "why"):
     just same basename, .csv extension). This is a per-clip external-network dependency, so
     pass --no-gps_fusion if it bottlenecks a very large batch.
 
-Per-clip intrinsics policy (always on, not configurable -- see conversation notes):
+Per-clip intrinsics policy (always on, not configurable; rationale: memory/backend-choice.md):
   - Every clip is checked for a sibling FIXED_METADATA.json (natix trip-dir convention:
     .../<trip_dir>/<timestamp>/FRONT_FOLDER/video.mp4, metadata one level above <timestamp>),
     cross-checked against the video's own encoded resolution (FIXED_METADATA.json's own

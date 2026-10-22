@@ -431,19 +431,12 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
     # -- while the GPS fixes themselves are ground truth and always correct. Centering on them
     # guarantees the query covers the right place regardless of how well the fit converges.
     #
-    # The crop's RADIUS, however, must cover wherever aligned_trans (the whole trajectory, not
-    # just its GPS-matched keyframes) says the clip goes, not just the spread of the raw GPS
-    # fixes themselves -- confirmed live on a clip whose GPS covered only ~47% of its duration:
-    # a GPS-derived radius alone left the real continuation of the road entirely outside the
-    # crop (way 207397504, the correct road, was missing) while the crop's edge still included
-    # an unrelated nearby loop (way 207397505) as the only through-route -- map-matching-2 then
-    # had no choice but to route the whole trajectory through that wrong loop (mean deviation
-    # 38.9m, max 123.8m). Re-extracting with the radius below (still GPS-centered) instead of
-    # the road network the production run actually used dropped that to 11.5m/24.2m -- the
-    # matched route no longer touches the loop at all. So: take the GPS radius or the distance
-    # from the GPS center to the farthest point of the (possibly still poorly-placed) aligned
-    # trajectory, whichever is larger -- a bad Umeyama fit only ever makes this radius bigger
-    # (fetching a needlessly large-but-still-correctly-centered area), never smaller/wrong.
+    # The crop's RADIUS, however, must cover wherever aligned_trans (the whole trajectory, not just its
+    # GPS-matched keyframes) goes, or map-matching can be forced through a wrong nearby road (case study:
+    # memory/gps-fusion-notes.md). So: take the GPS radius or the distance from the GPS center to the
+    # farthest point of the (possibly still poorly-placed) aligned trajectory, whichever is larger -- a bad
+    # Umeyama fit only ever makes this radius bigger (a needlessly large but still correctly-centered area),
+    # never smaller/wrong.
     gps_en = np.stack([gps["easting"], gps["northing"]], axis=1)
     gps_center_en = gps_en.mean(axis=0)
     crop_center_lon, crop_center_lat = to_wgs84.transform(*gps_center_en)
@@ -606,9 +599,8 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
     # against otherwise). Scored via _snap_points_to_line -- the SAME monotonic-snap method
     # run_map_match's own snapped/dev use and what map_match_error_mean_m in the manifest is
     # computed from -- rather than _icp_rigid_to_line's own nearest-point correspondence
-    # (_nearest_on_line), which can disagree substantially at loops/self-intersections (confirmed
-    # directly: one real clip's best-by-nearest-point iteration was 3.25m by that metric but 7.05m
-    # once measured the way it's actually reported).
+    # (_nearest_on_line), which can disagree substantially at loops/self-intersections
+    # (memory/gps-fusion-notes.md).
     #
     # Terminates on two independent conditions, checked after each correction: the correction
     # itself is negligible (nothing left to gain by continuing), or the best-seen score hasn't

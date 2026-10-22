@@ -193,23 +193,10 @@ def refuse_one(clip):
         return {"clip_id": clip_id, "ok": True,
                 "seconds": time.time() - t0, "gps_fusion": gps_fusion_info}
     except ValueError as e:
-        # align_trajectory_to_roads now raises these specific, expected precondition failures
-        # instead of silently falling back to a weaker fusion method -- give each its own
-        # structured status, same as the other expected outcomes above, rather than burying them
-        # in the generic "failed" bucket where only a traceback grep would distinguish them. Two
-        # distinct causes, deliberately told apart (see align_trajectory_to_roads's own comment on
-        # why): no road network at all near the GPS fixes (bad/missing OSM coverage for this
-        # location -- same root cause as the old "no_roads_in_any_region" outcome above, so reuses
-        # that name) vs. roads exist but the raw GPS track itself couldn't be routed through them
-        # (GPS too sparse/noisy to trace a matchable route). A third: the initial Umeyama scale
-        # fit itself is physically implausible (see align_trajectory_to_roads's
-        # max_plausible_speed_mps docstring) -- caught before any OSM crop/map-matching is even
-        # attempted, so this one is cheap to hit, unlike the other two.
+        # Same status ladder as main.py's except-ValueError branch (rationale: memory/gps-fusion-notes.md).
         if "no roads found near the GPS fixes" in str(e):
             gps_fusion_info = {"status": "no_roads_in_any_region", "error": str(e)}
         elif "raw-GPS map-match unavailable" in str(e):
-            # Split by the message's own "matched_line=found"/"matched_line=none" distinction --
-            # see main.py's matching branch for why these are different root causes.
             if "matched_line=found" in str(e):
                 gps_fusion_info = {"status": "no_raw_gps_route_too_sparse", "error": str(e)}
             else:
@@ -217,17 +204,13 @@ def refuse_one(clip):
         elif "implausible GPS-derived scale" in str(e):
             gps_fusion_info = {"status": "implausible_gps_scale", "error": str(e)}
         elif "No real GPS fixes" in str(e):
-            # Every row in this clip's sensor log is 'na' -- a genuine data-quality issue with
-            # that clip, not a bug. 70.9% of all "failed" gps_fusion records in one audit.
+            # Every row in this clip's sensor log is 'na'.
             gps_fusion_info = {"status": "no_real_gps_fixes", "error": str(e)}
         elif "keyframe(s) matched to a GPS fix" in str(e):
-            # Real GPS fixes exist, but fewer than 2 landed within max_dt of an actual keyframe --
-            # too sparse to fit a scale at all. 20.2% of the same audit above.
+            # Fewer than 2 keyframes within max_dt of a real GPS fix.
             gps_fusion_info = {"status": "insufficient_gps_matches", "error": str(e)}
         elif "distinct timestamp(s)" in str(e):
-            # Fewer than 2 distinct wall-clock timestamps in the sensor log -- confirmed on 268
-            # real clips, every one with exactly 1 sensor-log row total (a natix logging gap, not
-            # a bug); previously an opaque numpy.linalg.LinAlgError ("SVD did not converge").
+            # Fewer than 2 distinct timestamps in the sensor log.
             gps_fusion_info = {"status": "gps_log_too_short", "error": str(e)}
         else:
             gps_fusion_info = {"status": "failed", "error": traceback.format_exc()[-2000:]}

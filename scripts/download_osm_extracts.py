@@ -10,8 +10,8 @@ API, and are downloaded once, up front, instead -- vggt_slam/map_match.py no lon
 Overpass at all.
 
 A raw .osm.pbf has no spatial index, though -- finding "which roads are near this GPS point"
-means linearly scanning the whole file regardless of how small the area of interest is (measured
-directly: ~30s for a 139MB country file, minutes for a multi-GB one). Doing that lazily, once per
+means linearly scanning the whole file regardless of how small the area of interest is (slow for
+country-sized files, see memory/performance-investigations.md). Doing that lazily, once per
 clip's first cache miss, would stall that clip's GPU worker for however long its country's file
 takes to scan. So this script also builds a SQLite R-tree spatial index over each region's
 highway ways right after downloading it (see vggt_slam.map_match._build_spatial_index) --
