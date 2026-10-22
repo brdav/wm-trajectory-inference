@@ -204,10 +204,6 @@ def main():
     if args.skip_index:
         return
 
-    # TODO: add this to image
-    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-                    "--index-url", "https://pypi.org/simple", "--no-deps", "osmium"], check=True)
-
     done = 0
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.index_workers) as pool:
         futs = {pool.submit(_index_one, dest): key for key, dest in dests}

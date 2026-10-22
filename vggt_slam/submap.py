@@ -115,7 +115,7 @@ class Submap:
         homography_list = [graph.get_homography(i + self.get_id()) for i in range(len(self.poses))]
         poses = []
         for index, homography_world in enumerate(homography_list):
-            projection_mat = self.proj_mats[index] @ np.linalg.inv(homography_world) # TODO HERE
+            projection_mat = self.proj_mats[index] @ np.linalg.inv(homography_world)
             projection_mat = projection_mat / projection_mat[-1,-1]
             if give_camera_mat:
                 poses.append(projection_mat)

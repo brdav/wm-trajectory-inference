@@ -138,7 +138,7 @@ class Solver:
         for i in range(len(proj_mat_world_to_cam)):
             points_in_cam = world_points[i,...]
             points_in_cam_h = np.hstack([points_in_cam.reshape(-1, 3), np.ones((points_in_cam.shape[0] * points_in_cam.shape[1], 1))])
-            points_in_cam_h = (P_first_cam @ points_in_cam_h.T).T # TODO Dominic check if we want to use P_prior here
+            points_in_cam_h = (P_first_cam @ points_in_cam_h.T).T
             points_in_cam = points_in_cam_h[:, :3] / points_in_cam_h[:, 3:]
             world_points[i] = points_in_cam.reshape(h, w, 3)
         
@@ -227,7 +227,7 @@ class Solver:
             if index == 0:
                 continue
 
-            H_inner = world_to_cam[index-1] @ np.linalg.inv(pose) # TODO Dominic, no need to take the inverse twice, just use cam_to_world
+            H_inner = world_to_cam[index-1] @ np.linalg.inv(pose)
             current_node = self.graph.get_homography(submap_id_curr + index - 1) @ H_inner
 
             # Add node to graph.
