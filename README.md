@@ -47,6 +47,7 @@ scripts/slam/                       stage 1: SLAM + GPS fusion
 scripts/metric_scale/               stages 2-5: QC, depth-based scale, merge into result.npz + manifest.jsonl
   run_metric_scale.sbatch
   clip_qc.py  estimate_metric_scale.py  integrate_metric_scale.py  update_manifest_metric_scale.py   called by the sbatch
+scripts/slurm_common.sh              shared preamble of the two pipeline sbatch files (paths, environment, self-resubmission)
 scripts/setup/
   download_osm_extracts.py            OSM road extracts for GPS fusion (once, and for any new country)
 scripts/tools/                      maintenance and visualization, not needed to process data
