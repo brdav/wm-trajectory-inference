@@ -517,39 +517,231 @@ def build_arg_parser():
     return p
 
 
+class BatchRun:
+    """One batch: frames are extracted on a thread pool, fed to the GPU worker processes, and every outcome
+    (ok, failed, worker died, extraction failed) is appended to <manifest_dir>/manifest.jsonl."""
+
+    def __init__(self, args, clips, run_cfg, manifest_dir):
+        self.args = args
+        self.clips = clips
+        self.run_cfg = run_cfg
+        self.manifest_path = manifest_dir / "manifest.jsonl"
+        self.done = 0
+        self.submitted = 0  # clips submitted for extraction so far -- keeps growing until discovery finishes
+        self.fixed_count = self.shared_count = 0
+        self.in_progress = {}  # worker pid -> {"clip_id", "out_dir"} of the job it is on, see _reap_dead_workers
+        self.feeder_error = None
+        self.extract_done_q = queue.Queue()
+        self.workers = []
+        self.manifest_f = None
+        self.extract_slot = None
+
+    # -- workers and manifest ------------------------------------------------------------------
+
+    def _start_workers(self):
+        import multiprocessing as mp
+        args = self.args
+        ctx = mp.get_context("spawn")
+        self.job_queue = ctx.Queue()
+        self.result_queue = ctx.Queue()
+        total_workers = args.num_gpus * args.workers_per_gpu
+        cpu_threads = args.cpu_threads_per_worker or max(1, (os.cpu_count() or 1) // (total_workers + 1))
+        print(f"Capping each of {total_workers} GPU worker processes to {cpu_threads} CPU threads "
+              f"(OMP/MKL/OpenBLAS/torch)", flush=True)
+        self.workers = [
+            ctx.Process(target=gpu_worker, args=(gpu_id, self.run_cfg, self.job_queue, self.result_queue,
+                                                  args.keep_frames, args.gps_fusion, cpu_threads))
+            for gpu_id in range(args.num_gpus)
+            for _ in range(args.workers_per_gpu)
+        ]
+        for w in self.workers:
+            w.start()
+
+    def _record(self, row):
+        self.manifest_f.write(json.dumps(row) + "\n")
+        self.manifest_f.flush()
+
+    def _reap_dead_workers(self):
+        # Catches the one failure mode gpu_worker's own try/except can't: the whole process dying
+        # uncaught (OOM/SIGKILL, a fatal CUDA/driver error, a native segfault, ...) while a clip
+        # was in flight -- that clip's job never gets a completion message at all, and without
+        # this it would just be silently dropped: no manifest.jsonl record, and whatever partial
+        # result.npz the pipeline's own SLAM-stage save left behind on disk would make every future
+        # run's discover_clips skip-check treat it as already done, forever.
+        for w in self.workers:
+            if w.is_alive():
+                continue
+            lost = self.in_progress.pop(w.pid, None)
+            if lost is None:
+                continue  # died cleanly after its last job (or never got one) -- nothing lost
+            self.done += 1
+            self.extract_slot.release()
+            err = (f"gpu_worker process (pid={w.pid}) died without completing this clip "
+                   f"(exitcode={w.exitcode}) -- likely an OOM/SIGKILL or a fatal CUDA/driver "
+                   f"crash, neither catchable as a Python exception")
+            self._record({"clip_id": lost["clip_id"], "ok": False, "error": err})
+            print(f"[{self.done}/{self.submitted}] FAIL (worker died) {lost['clip_id']}: {err}",
+                  file=sys.stderr, flush=True)
+            # so a future run's discover_clips retries this clip instead of treating the crash's
+            # partial output as a completed run
+            out_dir = Path(lost["out_dir"])
+            if out_dir.exists():
+                shutil.rmtree(out_dir, ignore_errors=True)
+
+    def _drain_results(self, block=False):
+        while True:
+            try:
+                res = self.result_queue.get(block=block, timeout=1 if block else None)
+            except Exception:
+                break
+            if res.get("status") == "started":
+                self.in_progress[res["pid"]] = {"clip_id": res["clip_id"], "out_dir": res["out_dir"]}
+                continue
+            self.in_progress.pop(res["pid"], None)
+            self.done += 1
+            self.extract_slot.release()
+            # gpu / pid only identify the worker process (progress line, crash bookkeeping); not part of the row
+            self._record({k: v for k, v in res.items() if k not in ("gpu", "pid")})
+            status = "OK" if res["ok"] else "FAIL"
+            print(f"[{self.done}/{self.submitted}] {status} gpu{res['gpu']} {res['seconds']:.1f}s {res['clip_id']}",
+                  flush=True)
+            if not res["ok"]:
+                print(res["error"], file=sys.stderr, flush=True)
+        self._reap_dead_workers()
+
+    # -- extraction ----------------------------------------------------------------------------
+
+    def _tap(self, clip):
+        if clip["camera_meta"]:
+            self.fixed_count += 1
+        else:
+            self.shared_count += 1
+        return clip
+
+    def _feed(self, pool):
+        """Thread: submit each discovered clip for extraction, at most `extract_lookahead` ahead of the GPUs.
+        Must run concurrently with the main thread draining results: slots are only released by
+        _drain_results, so submitting everything upfront would deadlock. Always ends with the None
+        sentinel, also when discovery fails (the error is re-raised by run())."""
+        try:
+            for c in self.clips:
+                self.extract_slot.acquire()
+                self.submitted += 1
+                pool.submit(extract_one, self._tap(c), self.args.fps, self.args.ffmpeg_threads) \
+                    .add_done_callback(lambda fut: self.extract_done_q.put(fut.result()))
+        except BaseException:
+            self.feeder_error = traceback.format_exc()
+        finally:
+            self.extract_done_q.put(None)  # sentinel: discovery + submission is fully done
+
+    def _collect_extractions(self):
+        """Main thread: hand each extracted clip to the GPU workers until discovery is done and every
+        submitted clip has come back."""
+        discovery_done = False
+        extract_completed = 0
+        while not (discovery_done and extract_completed >= self.submitted):
+            # The timeout matters: a plain get() deadlocks once all lookahead slots are in flight and their GPU
+            # results finish before the next extraction (which cannot start, the feeder waits for a slot) --
+            # _drain_results, the only thing that frees a slot, would never be called. Periodic draining
+            # keeps the feeder unblocked even without an extraction event to react to.
+            try:
+                item = self.extract_done_q.get(timeout=1.0)
+            except queue.Empty:
+                self._drain_results(block=False)
+                continue
+            if item is None:
+                discovery_done = True
+                print(f"{self.submitted} clips discovered total ({self.fixed_count} --fixed_intrinsics, "
+                      f"{self.shared_count} --shared_intrinsics)", flush=True)
+                continue
+            extract_completed += 1
+            clip, err = item
+            if err:
+                self.extract_slot.release()
+                self.done += 1
+                self._record({"clip_id": str(clip["video_path"]), "ok": False, "stage": "extract", "error": err})
+                print(f"[{self.done}/{self.submitted}] FAIL extract {clip['video_path']}: {err}",
+                      file=sys.stderr, flush=True)
+                continue
+            self.job_queue.put(clip)
+            self._drain_results(block=False)
+
+    # -- run -----------------------------------------------------------------------------------
+
+    def run(self):
+        args = self.args
+        self._start_workers()
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest_f = open(self.manifest_path, "a")
+
+        lookahead = args.extract_lookahead or max(4, 2 * len(self.workers))
+        # Bounds how many clips are extracted-but-not-yet-GPU-consumed: acquired before a clip is submitted for
+        # extraction, released when its GPU worker finishes (frames deleted) or its extraction fails. Without it
+        # extraction races far ahead of the slower GPU workers and piles up on scratch_dir.
+        self.extract_slot = threading.Semaphore(lookahead)
+
+        print(f"Discovering clips and extracting frames with {args.num_extract_workers} workers "
+              f"(ffmpeg_threads={args.ffmpeg_threads} each), "
+              f"feeding {len(self.workers)} GPU workers ({args.num_gpus} GPUs x {args.workers_per_gpu}, "
+              f"extract_lookahead={lookahead})...", flush=True)
+
+        with ThreadPoolExecutor(max_workers=args.num_extract_workers) as pool:
+            feeder_thread = threading.Thread(target=self._feed, args=(pool,), daemon=True)
+            feeder_thread.start()
+            self._collect_extractions()
+            feeder_thread.join()
+
+        for _ in self.workers:
+            self.job_queue.put(None)
+        while self.done < self.submitted and any(w.is_alive() for w in self.workers):
+            self._drain_results(block=True)
+        self._drain_results(block=False)
+        for w in self.workers:
+            w.join()
+        self._reap_dead_workers()  # final catch-all in case the very last worker died right at this boundary
+
+        self.manifest_f.close()
+        print(f"Done. {self.done}/{self.submitted} accounted for. See {self.manifest_path}")
+        if self.feeder_error:
+            # clips discovered before the failure were processed; a non-zero exit also stops the self-resubmitting job
+            raise RuntimeError(f"clip discovery failed:\n{self.feeder_error}")
+
+
+def _single_clip(args):
+    """Clip list and manifest dir for single-clip mode (--video), or None if it is already processed."""
+    video_path = Path(args.video)
+    out_dir = Path(args.out_dir)
+    if not args.force and (out_dir / "result.npz").exists():
+        print(f"{out_dir / 'result.npz'} already exists (use --force to reprocess)")
+        return None
+    clips = [{
+        "video_path": video_path,
+        "out_dir": out_dir,
+        "frames_dir": Path(args.scratch_dir) / out_dir.name / "frames",
+        "camera_meta": _resolve_camera_meta(video_path),
+        "osm_region_pbf_path": Path(args.osm_region_pbf_path) if args.osm_region_pbf_path else None,
+        "osm_fallback_region_pbf_paths": (
+            [Path(args.osm_fallback_region_pbf_path)] if args.osm_fallback_region_pbf_path else []),
+    }]
+    return clips, out_dir
+
+
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
-
     if args.video and not args.out_dir:
         parser.error("--video requires --out_dir")
-    # without --video this is batch mode over --sample_manifest (dataset root / out root default to the natix locations)
-
-    osm_extracts_dir = args.osm_extracts_dir
-    if osm_extracts_dir is None and not args.video:
-        osm_extracts_dir = str(Path(args.out_root) / "_osm_extracts")
 
     if args.video:
-        video_path = Path(args.video)
-        out_dir = Path(args.out_dir)
-        if not args.force and (out_dir / "result.npz").exists():
-            print(f"{out_dir / 'result.npz'} already exists (use --force to reprocess)")
+        single = _single_clip(args)
+        if single is None:
             return
-        clips = [{
-            "video_path": video_path,
-            "out_dir": out_dir,
-            "frames_dir": Path(args.scratch_dir) / out_dir.name / "frames",
-            "camera_meta": _resolve_camera_meta(video_path),
-            "osm_region_pbf_path": Path(args.osm_region_pbf_path) if args.osm_region_pbf_path else None,
-            "osm_fallback_region_pbf_paths": (
-                [Path(args.osm_fallback_region_pbf_path)] if args.osm_fallback_region_pbf_path else []),
-        }]
-        manifest_dir = out_dir
+        clips, manifest_dir = single
     else:
-        # A generator, not a list: discover_clips streams clips as it goes, so extraction (see the
-        # ThreadPoolExecutor submission loop below) can start on the first clip immediately.
+        # batch mode over --sample_manifest; a generator, so extraction can start on the first clip immediately
+        osm_extracts_dir = args.osm_extracts_dir or str(Path(args.out_root) / "_osm_extracts")
         clips = discover_clips(args.dataset_root, args.out_root, args.scratch_dir, args.countries,
-                                args.limit, args.force, osm_extracts_dir, args.sample_manifest)
+                               args.limit, args.force, osm_extracts_dir, args.sample_manifest)
         manifest_dir = Path(args.out_root)
 
     run_cfg = dict(
@@ -559,181 +751,7 @@ def main():
             lc_thres=args.lc_thres),
         extraction_fps=args.fps, gps_max_dt=args.gps_max_dt, dense_log=args.dense_log,
     )
-
-    import multiprocessing as mp
-    ctx = mp.get_context("spawn")
-    job_queue = ctx.Queue()
-    result_queue = ctx.Queue()
-
-    total_workers = args.num_gpus * args.workers_per_gpu
-    cpu_threads = args.cpu_threads_per_worker or max(1, (os.cpu_count() or 1) // (total_workers + 1))
-    print(f"Capping each of {total_workers} GPU worker processes to {cpu_threads} CPU threads "
-          f"(OMP/MKL/OpenBLAS/torch)", flush=True)
-
-    workers = [
-        ctx.Process(target=gpu_worker, args=(gpu_id, run_cfg, job_queue, result_queue,
-                                              args.keep_frames, args.gps_fusion, cpu_threads))
-        for gpu_id in range(args.num_gpus)
-        for _ in range(args.workers_per_gpu)
-    ]
-    for w in workers:
-        w.start()
-
-    manifest_path = manifest_dir / "manifest.jsonl"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_f = open(manifest_path, "a")
-
-    done = 0
-    submitted = 0  # clips submitted for extraction so far -- keeps growing until discovery finishes
-    in_progress = {}  # worker pid -> {"clip_id", "out_dir"} for whatever job it's currently on,
-                       # if any -- see _reap_dead_workers below.
-
-    lookahead = args.extract_lookahead or max(4, 2 * len(workers))
-    # Bounds how many clips can be extracted-but-not-yet-GPU-consumed at once: acquired before
-    # submitting a clip for extraction, released once that clip's GPU worker finishes (its frames
-    # are deleted at that point) or its extraction fails outright. Without this, extraction races
-    # far ahead of the (much slower per-clip) GPU workers and piles up unboundedly on scratch_dir.
-    extract_slot = threading.Semaphore(lookahead)
-
-    def _reap_dead_workers():
-        # Catches the one failure mode gpu_worker's own try/except can't: the whole process dying
-        # uncaught (OOM/SIGKILL, a fatal CUDA/driver error, a native segfault, ...) while a clip
-        # was in flight -- that clip's job never gets a completion message at all, and without
-        # this it would just be silently dropped: no manifest.jsonl record, and whatever partial
-        # result.npz the pipeline's own SLAM-stage save left behind on disk would make every future
-        # run's discover_clips skip-check treat it as already done, forever. Confirmed to happen
-        # in practice this way.
-        nonlocal done
-        for w in workers:
-            if w.is_alive():
-                continue
-            lost = in_progress.pop(w.pid, None)
-            if lost is None:
-                continue  # died cleanly after its last job (or never got one) -- nothing lost
-            done += 1
-            extract_slot.release()
-            err = (f"gpu_worker process (pid={w.pid}) died without completing this clip "
-                   f"(exitcode={w.exitcode}) -- likely an OOM/SIGKILL or a fatal CUDA/driver "
-                   f"crash, neither catchable as a Python exception")
-            manifest_f.write(json.dumps({"clip_id": lost["clip_id"], "ok": False,
-                                          "error": err}) + "\n")
-            manifest_f.flush()
-            print(f"[{done}/{submitted}] FAIL (worker died) {lost['clip_id']}: {err}",
-                  file=sys.stderr, flush=True)
-            # So a future run's discover_clips naturally retries this clip instead of silently
-            # treating the crash's own partial output as a completed run.
-            out_dir = Path(lost["out_dir"])
-            if out_dir.exists():
-                shutil.rmtree(out_dir, ignore_errors=True)
-
-    def drain_results(block=False):
-        nonlocal done
-        while True:
-            try:
-                res = result_queue.get(block=block, timeout=1 if block else None)
-            except Exception:
-                break
-            if res.get("status") == "started":
-                in_progress[res["pid"]] = {"clip_id": res["clip_id"], "out_dir": res["out_dir"]}
-                continue
-            in_progress.pop(res["pid"], None)
-            done += 1
-            extract_slot.release()
-            # gpu / pid only identify the worker process (used for the progress line below and for crash
-            # bookkeeping); they are not part of the manifest row
-            manifest_f.write(json.dumps({k: v for k, v in res.items() if k not in ("gpu", "pid")}) + "\n")
-            manifest_f.flush()
-            status = "OK" if res["ok"] else "FAIL"
-            print(f"[{done}/{submitted}] {status} gpu{res['gpu']} {res['seconds']:.1f}s {res['clip_id']}", flush=True)
-            if not res["ok"]:
-                print(res["error"], file=sys.stderr, flush=True)
-        _reap_dead_workers()
-
-    print(f"Discovering clips and extracting frames with {args.num_extract_workers} workers "
-          f"(ffmpeg_threads={args.ffmpeg_threads} each), "
-          f"feeding {len(workers)} GPU workers ({args.num_gpus} GPUs x {args.workers_per_gpu}, "
-          f"extract_lookahead={lookahead})...", flush=True)
-
-    fixed_count, shared_count = 0, 0
-
-    def _tap(c):
-        nonlocal fixed_count, shared_count
-        if c["camera_meta"]:
-            fixed_count += 1
-        else:
-            shared_count += 1
-        return c
-
-    # extract_slot.acquire() (in feeder, below) can only unblock once a GPU result comes back
-    # through drain_results -- so submission must run on its own thread, concurrently with the
-    # main thread draining extraction results, not gated behind a single fully-submitted batch
-    # (submitting everything upfront in one comprehension would deadlock: nothing could ever
-    # release a permit until submission finished, and submission can't finish without a permit).
-    extract_done_q = queue.Queue()
-
-    def feeder(pool):
-        nonlocal submitted
-        for c in clips:
-            extract_slot.acquire()
-            submitted += 1
-            pool.submit(extract_one, _tap(c), args.fps, args.ffmpeg_threads) \
-                .add_done_callback(lambda fut: extract_done_q.put(fut.result()))
-        extract_done_q.put(None)  # sentinel: discovery + submission is fully done
-
-    with ThreadPoolExecutor(max_workers=args.num_extract_workers) as pool:
-        feeder_thread = threading.Thread(target=feeder, args=(pool,), daemon=True)
-        feeder_thread.start()
-
-        discovery_done = False
-        extract_completed = 0
-        while not (discovery_done and extract_completed >= submitted):
-            # A plain, untimed extract_done_q.get() deadlocks once all extract_lookahead slots
-            # are in flight and their GPU results finish before the corresponding NEXT extraction
-            # (which can't even start yet -- feeder is blocked on extract_slot.acquire()) --
-            # drain_results (the only thing that releases a slot) was only ever called from right
-            # here, so nothing wakes this loop to call it once there's no *new* extraction to
-            # react to. Confirmed live: all 361 threads in this process sitting idle, extraction
-            # pool completely quiet, feeder permanently blocked on acquire(). A timeout makes this
-            # loop periodically drain result_queue and free up slots even with no extraction
-            # event to react to, which is what actually keeps the feeder unblocked.
-            try:
-                item = extract_done_q.get(timeout=1.0)
-            except queue.Empty:
-                drain_results(block=False)
-                continue
-            if item is None:
-                discovery_done = True
-                print(f"{submitted} clips discovered total ({fixed_count} --fixed_intrinsics, "
-                      f"{shared_count} --shared_intrinsics)", flush=True)
-                continue
-            extract_completed += 1
-            clip, err = item
-            if err:
-                extract_slot.release()
-                done += 1
-                manifest_f.write(json.dumps({"clip_id": str(clip["video_path"]), "ok": False,
-                                              "stage": "extract", "error": err}) + "\n")
-                manifest_f.flush()
-                print(f"[{done}/{submitted}] FAIL extract {clip['video_path']}: {err}", file=sys.stderr, flush=True)
-                continue
-            job_queue.put(clip)
-            drain_results(block=False)
-
-        feeder_thread.join()
-
-    for _ in workers:
-        job_queue.put(None)
-
-    while done < submitted and any(w.is_alive() for w in workers):
-        drain_results(block=True)
-    drain_results(block=False)
-
-    for w in workers:
-        w.join()
-    _reap_dead_workers()  # final catch-all in case the very last worker died right at this boundary
-
-    manifest_f.close()
-    print(f"Done. {done}/{submitted} accounted for. See {manifest_path}")
+    BatchRun(args, clips, run_cfg, manifest_dir).run()
 
 
 if __name__ == "__main__":
