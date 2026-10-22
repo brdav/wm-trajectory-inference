@@ -9,17 +9,13 @@ video in the sample manifest; the existing manifest predates that. This script
   3. adds a row for every sample-manifest video that has none (ok=false, stage="backfilled": the clip has a result
      in its session zip but the original run left no record, most likely a worker that died after saving the SLAM
      result),
-  4. sets `fixed_intrinsics` on every row that was not recorded by the original run (missing, or already marked
-     fixed_intrinsics_inferred): True iff the clip's session zip contains `undistort_maps.npz`. batch_infer.py writes
-     that file into the session folder when it computes the undistortion maps from the camera calibration, so a
-     session without it was processed entirely with self-calibration. Rows with a recorded value keep it.
-     The rule is checked against all rows that have a recorded value and the script stops below 99% agreement
-     (it is 99.2%). The 576 disagreements are single clips recorded False in sessions that do have the maps: a race in
-     the undistortion cache (two clips of one session extracted at the same moment shared a temp file; the second
-     silently fell back to self-calibration; fixed in b722ac4). Such clips look calibrated under this rule, about 0.8%
-     of the inferred True values (about 375 rows), and cannot be told apart without rerunning them. Every row touched
-     by this rule is marked
-     fixed_intrinsics_inferred = true.
+  4. fills `fixed_intrinsics` on rows that have none: True iff the clip's session zip contains `undistort_maps.npz`.
+     batch_infer.py writes that file into the session folder when it computes the undistortion maps from the camera
+     calibration, so a session without it was processed entirely with self-calibration. The rule is checked against
+     all rows that have a recorded value and the script stops below 99% agreement (it was 99.2% when this was
+     first run: a race in the undistortion cache, fixed in b722ac4, made single clips of a session self-calibrate
+     although the session has the maps; such clips look calibrated under this rule and cannot be told apart without
+     rerunning them),
 and writes the manifest in place after saving a timestamped backup next to it. Run
 scripts/update_manifest_metric_scale.py afterwards (it normalizes every row to the fixed schema and fills qc /
 metric_scale / pose_source for the new rows). Idempotent.
@@ -102,18 +98,18 @@ def main():
           f"({sum(v is True for v in maps.values())} have {MAPS_FILE}, {sum(v is False for v in maps.values())} lack it, "
           f"{sum(v is None for v in maps.values())} not found)", flush=True)
 
-    recorded = [r for r in rows if r.get("fixed_intrinsics") is not None and not r.get("fixed_intrinsics_inferred")]
+    recorded = [r for r in rows if r.get("fixed_intrinsics") is not None]
     known = [r for r in recorded if maps[sess(r)] is not None]
     agree = sum(maps[sess(r)] == r["fixed_intrinsics"] for r in known)
     rate = agree / max(len(known), 1)
-    print(f"rule check on all {len(known)} rows with a recorded value: agrees on {agree} ({100 * rate:.2f}%); "
+    print(f"rule check on all {len(known)} rows that have a value (recorded or backfilled earlier): agrees on {agree} ({100 * rate:.2f}%); "
           f"{len(known) - agree} disagree (recorded False although the session has maps: "
           f"{sum(1 for r in known if maps[sess(r)] and not r['fixed_intrinsics'])}; recorded True although it has none: "
           f"{sum(1 for r in known if maps[sess(r)] is False and r['fixed_intrinsics'])})", flush=True)
     if rate < 0.99:
         sys.exit("agreement below 99% -- not backfilling; investigate")
 
-    targets = [r for r in rows if r.get("fixed_intrinsics") is None or r.get("fixed_intrinsics_inferred")]
+    targets = [r for r in rows if r.get("fixed_intrinsics") is None]
     changed = unresolved = 0
     for r in targets:
         v = maps[sess(r)]
@@ -122,8 +118,7 @@ def main():
             continue
         changed += (r.get("fixed_intrinsics") != v)
         r["fixed_intrinsics"] = v
-        r["fixed_intrinsics_inferred"] = True
-    print(f"rule applied to {len(targets)} rows not recorded by the original run: value changed on {changed}, "
+    print(f"rule applied to {len(targets)} rows without a value: value changed on {changed}, "
           f"left unresolved (no session zip/folder): {unresolved}; result: "
           f"{sum(1 for r in targets if r['fixed_intrinsics'])} True, {sum(1 for r in targets if r['fixed_intrinsics'] is False)} False; "
           f"{len(rows)} rows in total", flush=True)

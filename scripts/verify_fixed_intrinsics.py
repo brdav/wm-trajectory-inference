@@ -2,9 +2,9 @@
 """Make `fixed_intrinsics` in trajectories/manifest.jsonl definitive wherever there is hard evidence, instead of inferred.
 
 The question per clip: did the original run use the camera calibration (fixed intrinsics) or fall back to
-self-calibration? batch_infer.py recorded the answer for ~72,800 clips; the rest were inferred from the session zips
-(scripts/backfill_manifest.py), which misses clips that fell back individually (a race in the undistortion cache,
-fixed in b722ac4). Hard evidence, in decreasing order of precedence:
+self-calibration? batch_infer.py recorded the answer for ~72,800 clips; for the rest it was inferred from the session
+zips (scripts/backfill_manifest.py), which misses clips that fell back individually (a race in the undistortion cache,
+fixed in b722ac4). This script overrides a value wherever there is hard evidence, in decreasing order of precedence:
 
   1. rerun_identical / rerun_differs  (--rerun_root, repeatable): a rerun of the clip with the CURRENT code (fixed
      intrinsics) in another output folder, compared with the stored result.npz. Reruns of fixed-intrinsics clips
@@ -18,9 +18,9 @@ fixed in b722ac4). Hard evidence, in decreasing order of precedence:
   3. session_without_maps: the session's zip has no undistort_maps.npz, so no clip of that session used fixed
      intrinsics.
 
-For every clip with such evidence `fixed_intrinsics` is set to the evidenced value and `fixed_intrinsics_inferred`
-to false. Clips without evidence keep their value (recorded by the original run, or inferred from the session maps and
-still marked inferred). The evidence per clip is written to a CSV (--evidence_out) so every value stays traceable.
+For every clip with such evidence `fixed_intrinsics` is set to the evidenced value; clips without evidence keep
+their value (recorded by the original run, or inferred from the session maps). The evidence per clip is written
+to a CSV (--evidence_out) so every verified value stays traceable.
 Writes the manifest in place after saving a timestamped backup next to it. Idempotent.
 
 Usage:
@@ -131,12 +131,12 @@ def main():
             if v["state"] == "mismatch" and cid[len(root):] in by_clip:
                 add(cid[len(root):], False, "estimator_rerun_refused")
         # 3. sessions whose zip has no maps file
-        sessions = sorted({session_of(c) for c, r in by_clip.items() if r["fixed_intrinsics_inferred"]})
+        sessions = sorted({session_of(c) for c in by_clip})
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from backfill_manifest import session_has_maps
         maps = dict(pool.map(session_has_maps, [(s, args.out_root) for s in sessions], chunksize=200))
     for c, r in by_clip.items():
-        if r["fixed_intrinsics_inferred"] and maps.get(session_of(c)) is False:
+        if maps.get(session_of(c)) is False:
             add(c, False, "session_without_maps")
 
     # ---- what changes
@@ -144,30 +144,23 @@ def main():
     changes = []
     for clip, (value, source) in sorted(evidence.items()):
         r = by_clip[clip]
-        was = ("inferred" if r["fixed_intrinsics_inferred"] else "recorded", r["fixed_intrinsics"])
-        stat[(source, was[0], was[1], value)] += 1
-        changes.append((clip, value, source, r["fixed_intrinsics"], r["fixed_intrinsics_inferred"]))
-    print(f"\nevidence for {len(evidence)} of {len(rows)} clips. (source, previously recorded/inferred, previous value -> evidenced value): rows")
+        stat[(source, r["fixed_intrinsics"], value)] += 1
+        changes.append((clip, value, source, r["fixed_intrinsics"]))
+    print(f"\nevidence for {len(evidence)} of {len(rows)} clips. (source, previous value -> evidenced value): rows")
     for k, v in sorted(stat.items(), key=lambda x: -x[1]):
-        print(f"  {v:6d}  {k[0]:28s} {k[1]:8s} {str(k[2]):5s} -> {k[3]}")
-    n_inf = sum(1 for r in rows if r["fixed_intrinsics_inferred"])
-    resolved = sum(1 for c, (v, s) in evidence.items() if by_clip[c]["fixed_intrinsics_inferred"])
-    flips = sum(1 for c, v, s, old, inf in changes if old != v)
-    print(f"\ninferred rows: {n_inf}; made definitive by evidence: {resolved}; still inferred afterwards: {n_inf - resolved}")
-    print(f"value changes: {flips} (of which recorded values overridden by a rerun: "
-          f"{sum(1 for c, v, s, old, inf in changes if old != v and not inf)})")
+        print(f"  {v:6d}  {k[0]:28s} {str(k[1]):5s} -> {k[2]}")
+    print(f"\nvalue changes: {sum(1 for c, v, s, old in changes if old != v)}")
     if args.dry_run:
         return
 
-    for clip, value, source, old, inf in changes:
+    for clip, value, source, old in changes:
         by_clip[clip]["fixed_intrinsics"] = value
-        by_clip[clip]["fixed_intrinsics_inferred"] = False
     Path(args.evidence_out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.evidence_out, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["clip_id", "fixed_intrinsics", "evidence", "previous_value", "previous_was_inferred"])
-        for clip, value, source, old, inf in changes:
-            w.writerow([root + clip, value, source, old, inf])
+        w.writerow(["clip_id", "fixed_intrinsics", "evidence", "previous_value"])
+        for clip, value, source, old in changes:
+            w.writerow([root + clip, value, source, old])
     bak = Path(f"{args.manifest}.bak_{time.strftime('%Y%m%dT%H%M%S')}")
     shutil.copy2(args.manifest, bak)
     print(f"backup: {bak}")
