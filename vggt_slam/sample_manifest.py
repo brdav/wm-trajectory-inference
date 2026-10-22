@@ -6,11 +6,11 @@ the dataset root (Country/.../<session>/<HH-MM-SS>/FRONT_FOLDER/FRONT_<timestamp
 processes whole source videos, so the work list is the set of unique source videos in the manifest,
 not the 5 s chunks. Nothing walks the dataset tree.
 
-Both scripts/batch_infer.py (what to process) and scripts/pack_sessions.py (which sessions are
+Both scripts/slam/batch_infer.py (what to process) and scripts/slam/pack_sessions.py (which sessions are
 complete) read the manifest through this module, so they always agree on the clip list.
 
 To process more data: add its videos to the sample manifest (same columns), then run
-scripts/run_full_dataset.sbatch.
+scripts/slam/run_full_dataset.sbatch.
 """
 from pathlib import Path
 

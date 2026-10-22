@@ -356,14 +356,13 @@ def fetch_regions(root: str, workers: int = 8):
     from concurrent.futures import ThreadPoolExecutor
 
     import shapely
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ (download_osm_extracts)
-    import download_osm_extracts as dl
+    from vggt_slam import geofabrik
 
-    targets = dict(dl.all_targets())
+    targets = dict(geofabrik.all_targets())
 
     def get(item):
         key, path = item
-        txt = urllib.request.urlopen(f"{dl.BASE}/{path}.poly", timeout=120).read().decode()
+        txt = urllib.request.urlopen(f"{geofabrik.BASE}/{path}.poly", timeout=120).read().decode()
         return key, shapely.simplify(_parse_poly(txt), 0.003).wkt
 
     with ThreadPoolExecutor(workers) as ex:

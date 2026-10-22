@@ -6,7 +6,7 @@ clip_qc.py - per-clip quality control that separates the two ways a trajectory c
     and must not be used at all (not even re-scaled).
   * fusion/scale failure: SLAM is fine but the GPS / map-matching step gave it a wrong metric
     scale (or none). `fused_poses` are unusable, but `slam_poses` can be re-scaled, i.e. the clip
-    belongs on the scripts/estimate_metric_scale.py path.
+    belongs on the scripts/metric_scale/estimate_metric_scale.py path.
 
 This works because fused_poses are slam_poses under ONE global similarity transform (verified
 over the whole dataset: the fused/SLAM step-length ratio is constant within a clip), so the two
@@ -42,7 +42,7 @@ Reads only the existing result.npz files (and the raw GPS CSVs for the length ch
 Thresholds were set from the distribution over ~120k clips and not checked against ground
 truth -- see the constants below and the printed summary.
 
-Usage:  python scripts/clip_qc.py --out clip_qc.csv [--workers 32] [--limit_zips N]
+Usage:  python scripts/metric_scale/clip_qc.py --out clip_qc.csv [--workers 32] [--limit_zips N]
 """
 import argparse
 import io
@@ -57,7 +57,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from vggt_slam import gps as gps_module
 from vggt_slam import paths
 
@@ -164,7 +164,7 @@ def write_config(csv_path, df=None):
               and not k.endswith("_ROOT")}
     cfg = dict(qc_version=QC_VERSION, created=datetime.datetime.now().isoformat(timespec="seconds"),
                git_commit=git("rev-parse", "HEAD"), git_dirty=bool(git("status", "--porcelain", "--", os.path.abspath(__file__))),
-               script="scripts/clip_qc.py", thresholds=consts,
+               script="scripts/metric_scale/clip_qc.py", thresholds=consts,
                n_clips=int(len(df)), routes={k: int(v) for k, v in df.route.value_counts().items()})
     with open(str(csv_path) + ".config.json", "w") as f:
         json.dump(cfg, f, indent=2)
@@ -194,7 +194,7 @@ def process_zip(zip_path):
             z = np.load(io.BytesIO(zf.read(member)))
             t = (z["frame_ids"] - 1) / float(z["extraction_fps"])  # same time base as gps_fusion
             row["n_keyframes"] = len(t)
-            row["has_metric_scale"] = "metric_scale" in z.files  # already integrated, see scripts/integrate_metric_scale.py
+            row["has_metric_scale"] = "metric_scale" in z.files  # already integrated, see scripts/metric_scale/integrate_metric_scale.py
             slam_ok, reason, valid_until, max_ratio = check_slam(t, z["slam_poses"])
             row.update(slam_ok=slam_ok, slam_reason=reason, slam_valid_until_s=valid_until,
                        slam_max_step_ratio=max_ratio)

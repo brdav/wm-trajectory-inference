@@ -9,12 +9,12 @@
 #SBATCH --output=/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/_pipeline/logs/%x_%j.log
 #SBATCH --signal=B:SIGUSR1@300
 #
-# Runs scripts/batch_infer.py over every source video listed in the dataset's sample manifest (parquet; see
+# Runs scripts/slam/batch_infer.py over every source video listed in the dataset's sample manifest (parquet; see
 # vggt_slam/sample_manifest.py -- the dataset tree is not walked), self-resubmitting as a new job every time the
 # walltime above runs out, until everything is done; then packs the output into session zips
-# (scripts/pack_sessions.py). Submit once:
+# (scripts/slam/pack_sessions.py). Submit once:
 #
-#   sbatch scripts/run_full_dataset.sbatch
+#   sbatch scripts/slam/run_full_dataset.sbatch
 #
 # On walltime timeout, SLURM kills every process in the job's cgroup -- including this script's
 # own bash process, not just the srun child -- so code placed *after* srun would never run in
@@ -44,13 +44,13 @@
 #
 # To process more data: add its source videos to the sample manifest (same columns) and submit this script
 # again. Videos already processed are skipped, new clips of an already-packed session are processed and
-# merged into that session's zip by the packing step. Afterwards run scripts/run_metric_scale.sbatch
+# merged into that session's zip by the packing step. Afterwards run scripts/metric_scale/run_metric_scale.sbatch
 # (QC, depth-based scale for clips without a trusted GPS scale, manifest fields).
 #
 # Everything is written under $TRAJ_ROOT (the trajectories folder): per-clip results (session zips after the
 # packing step), manifest.jsonl, and job logs / STOP file / resubmit counter in $TRAJ_ROOT/_pipeline/.
 # TRAJ_ROOT, DATASET_ROOT and SAMPLE_MANIFEST can be overridden from the environment, e.g. to test on a few
-# clips: sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch
+# clips: sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/slam/run_full_dataset.sbatch
 
 set -uo pipefail
 
@@ -104,7 +104,7 @@ trap 'echo "=== $(date -Iseconds) job $SLURM_JOB_ID: caught SIGUSR1, walltime ap
 
 echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME ==="
 
-srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/batch_infer.py" \
+srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/slam/batch_infer.py" \
     --dataset_root "$DATASET_ROOT" \
     --out_root "$TRAJ_ROOT" \
     --sample_manifest "$SAMPLE_MANIFEST" \
@@ -123,12 +123,12 @@ if [ "$EXIT_CODE" -eq 0 ]; then
     # --min_age_days 0: this job's batch_infer.py has just finished, nothing is still writing. Sessions that
     # already have a zip get the new clips merged in; sessions with a clip still missing stay loose.
     echo "=== $(date -Iseconds) packing sessions into zips"
-    srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/pack_sessions.py" \
+    srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/slam/pack_sessions.py" \
         --dataset_root "$DATASET_ROOT" \
         --out_root "$TRAJ_ROOT" \
         --sample_manifest "$SAMPLE_MANIFEST" \
         --min_age_days 0 || { echo "pack_sessions.py failed -- output is intact but not packed; rerun it by hand" >&2; exit 1; }
-    echo "=== $(date -Iseconds) done. Next: sbatch scripts/run_metric_scale.sbatch"
+    echo "=== $(date -Iseconds) done. Next: sbatch scripts/metric_scale/run_metric_scale.sbatch"
     exit 0
 fi
 

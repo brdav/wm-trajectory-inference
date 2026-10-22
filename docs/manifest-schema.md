@@ -2,7 +2,7 @@
 
 One JSON object per source video, **always with exactly these keys** (null when a key does not
 apply; nested objects always have all of their keys too). Written by `batch_infer.py` (first
-block) and completed by `scripts/update_manifest_metric_scale.py` (rest), which also normalizes
+block) and completed by `scripts/metric_scale/update_manifest_metric_scale.py` (rest), which also normalizes
 every row to this schema.
 
 | key | content |

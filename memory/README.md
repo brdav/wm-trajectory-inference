@@ -8,7 +8,7 @@ true when they were measured and may be stale; the code and `README.md` describe
 | File | Contents |
 |---|---|
 | [qc-validation.md](qc-validation.md) | How good is the QC? Spot-check against depth scale (2026-10-21) |
-| [qc-thresholds-rationale.md](qc-thresholds-rationale.md) | Evidence behind each threshold in `scripts/clip_qc.py` and the cross-check rules |
+| [qc-thresholds-rationale.md](qc-thresholds-rationale.md) | Evidence behind each threshold in `scripts/metric_scale/clip_qc.py` and the cross-check rules |
 | [dataset-snapshot-2026-10.md](dataset-snapshot-2026-10.md) | Clip counts per `pose_source` / reason at 2026-10-20 |
 | [manifest-and-scale-history.md](manifest-and-scale-history.md) | `fixed_intrinsics` backfill, undistortion-cache race, rerun scale transfer, backfilled rows |
 | [gps-fusion-notes.md](gps-fusion-notes.md) | Failure-status audit, crop-radius case study, map-match scoring |

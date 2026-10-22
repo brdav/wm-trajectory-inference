@@ -1,4 +1,4 @@
-"""QC routing (scripts/clip_qc.py) on synthetic poses, GPS logs and session zips. CPU only."""
+"""QC routing (scripts/metric_scale/clip_qc.py) on synthetic poses, GPS logs and session zips. CPU only."""
 import io
 import zipfile
 from datetime import datetime, timedelta

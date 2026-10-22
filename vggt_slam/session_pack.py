@@ -1,4 +1,4 @@
-"""Shared helpers for the session-level zip archive format that scripts/pack_sessions.py /
+"""Shared helpers for the session-level zip archive format that scripts/slam/pack_sessions.py /
 scripts/tools/unpack_sessions.py use to cut the output tree's inode count further, on top of the
 per-clip result.npz consolidation (see save_result_npz's docstring). Packing replaces a whole
 Country/Date/Session/ directory (session_cache_dir's return value -- everything sharing one
@@ -12,10 +12,10 @@ why (refuse_gps.py already re-touches old, already-"finished" clips, so packing 
 session will never need writing to again; it can only make that the exception, not something
 every reader has to handle transparently).
 
-Packing-awareness in the live pipeline: scripts/batch_infer.py's clips_to_process treats a clip as done if
+Packing-awareness in the live pipeline: scripts/slam/batch_infer.py's clips_to_process treats a clip as done if
 its result.npz is loose, has an ok row in manifest.jsonl, or is a member of the session zip
 (session_zip_path). A packed session is therefore NOT assumed complete: a clip added to it later is processed,
-and scripts/pack_sessions.py merges it into the existing zip.
+and scripts/slam/pack_sessions.py merges it into the existing zip.
 """
 from vggt_slam.undistort import session_cache_dir
 

@@ -7,7 +7,7 @@ so they're computed once from just (width, height) via compute_undistort_maps(),
 in-memory, per frame, via undistort_frame(). This lets a caller (vggt_slam/pipeline.py's keyframe-selection
 loop) undistort only the frames it actually keeps as keyframes, instead of every extracted frame.
 
-Used by scripts/batch_infer.py (computes+caches the maps once per recording session -- see
+Used by scripts/slam/batch_infer.py (computes+caches the maps once per recording session -- see
 session_cache_dir -- and vggt_slam/pipeline.py (loads the cached maps and applies them per selected keyframe).
 """
 import os
@@ -77,7 +77,7 @@ def save_undistort_maps(path, map1, map2, roi):
     corrupted partial read.
     """
     path = str(path)
-    # unique per thread as well as per process: scripts/batch_infer.py extracts clips in a thread pool inside one
+    # unique per thread as well as per process: scripts/slam/batch_infer.py extracts clips in a thread pool inside one
     # process, and two threads of the same session used to share one temp name (the second os.replace then found
     # no file and that clip silently fell back to self-calibration)
     tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"

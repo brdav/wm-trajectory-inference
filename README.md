@@ -12,9 +12,9 @@ Below are the commands used to process Natix:
 
 | Task | Command |
 |---|---|
-| Process every source video in the dataset's sample manifest (self-resubmitting until done, packs the output into session zips at the end) | `sbatch scripts/run_full_dataset.sbatch` |
-| Then: QC, depth-based metric scale for clips without a usable GPS scale, merge into `result.npz` + `manifest.jsonl` | `sbatch scripts/run_metric_scale.sbatch` |
-| Download OSM road-network extracts (once, and for any new country, before GPS fusion) | `python scripts/download_osm_extracts.py --out_dir <dir>` |
+| Process every source video in the dataset's sample manifest (self-resubmitting until done, packs the output into session zips at the end) | `sbatch scripts/slam/run_full_dataset.sbatch` |
+| Then: QC, depth-based metric scale for clips without a usable GPS scale, merge into `result.npz` + `manifest.jsonl` | `sbatch scripts/metric_scale/run_metric_scale.sbatch` |
+| Download OSM road-network extracts (once, and for any new country, before GPS fusion) | `python scripts/setup/download_osm_extracts.py --out_dir <dir>` |
 | Take a packed session apart again to edit it | `python scripts/tools/unpack_sessions.py ...` |
 
 New data? See [Processing new data](#processing-new-data).
@@ -41,12 +41,14 @@ deliberately kept out of the docs and the code comments; see [memory/README.md](
 ## Scripts layout
 
 ```
-scripts/                            the pipeline (what you run to process data)
-  run_full_dataset.sbatch             stage 1: SLAM + GPS fusion for every video of the sample manifest, then packs session zips
-  run_metric_scale.sbatch             stage 2: QC, depth-based scale, merge into result.npz + manifest.jsonl
-  batch_infer.py  pack_sessions.py                                     called by stage 1
-  clip_qc.py  estimate_metric_scale.py  integrate_metric_scale.py  update_manifest_metric_scale.py   called by stage 2
-  download_osm_extracts.py            setup: OSM road extracts for GPS fusion (once, and for any new country)
+scripts/slam/                       stage 1: SLAM + GPS fusion
+  run_full_dataset.sbatch             every video of the sample manifest, then packs the session zips
+  batch_infer.py  pack_sessions.py    called by the sbatch
+scripts/metric_scale/               stages 2-5: QC, depth-based scale, merge into result.npz + manifest.jsonl
+  run_metric_scale.sbatch
+  clip_qc.py  estimate_metric_scale.py  integrate_metric_scale.py  update_manifest_metric_scale.py   called by the sbatch
+scripts/setup/
+  download_osm_extracts.py            OSM road extracts for GPS fusion (once, and for any new country)
 scripts/tools/                      maintenance and visualization, not needed to process data
   unpack_sessions.py                  restore a packed session zip to a loose folder
   refuse_gps.py                       rerun GPS fusion only, on already processed clips
@@ -54,6 +56,9 @@ scripts/tools/                      maintenance and visualization, not needed to
 scripts/osm_maps/                   separate product: ego-centred OSM map images for the clips (consumes the fused trajectories)
   osm_bev.py  make_osm_maps.py  make_osm_report.py  run_osm_prepare.sbatch  run_osm_maps.sbatch
 ```
+
+The scripts are thin drivers: the logic is in `vggt_slam/` (`pipeline.py` per-clip SLAM, `fusion.py` GPS fusion,
+`clip_prep.py` frames and calibration, `paths.py` locations).
 
 ## Processing new data
 
@@ -67,21 +72,21 @@ no path cache exists. Read via `vggt_slam/sample_manifest.py`.
 
 **To process more data**
 1. Put the videos on the dataset root and get them into the sample manifest (same columns). New countries also
-   need their OSM extracts (`scripts/download_osm_extracts.py`), otherwise GPS fusion is skipped for them.
-2. `sbatch scripts/run_full_dataset.sbatch` (SLAM + GPS fusion, `batch_infer.py`). A video is skipped if it already
+   need their OSM extracts (`scripts/setup/download_osm_extracts.py`), otherwise GPS fusion is skipped for them.
+2. `sbatch scripts/slam/run_full_dataset.sbatch` (SLAM + GPS fusion, `batch_infer.py`). A video is skipped if it already
    has a loose `result.npz`, an ok row in `trajectories/manifest.jsonl`, or its `result.npz` inside its session
    zip. The job resubmits itself every 12 h until nothing is left (stop it with
    `touch trajectories/_pipeline/STOP`; counter in `_pipeline/.resubmit_count`, max 40). When everything is
-   done it **packs the output into session zips** (`scripts/pack_sessions.py`): one zip per session, only for
+   done it **packs the output into session zips** (`scripts/slam/pack_sessions.py`): one zip per session, only for
    sessions in which every manifest video has a result; clips of a session that already has a zip are
    **merged into it**. It prints the next command.
-3. `sbatch scripts/run_metric_scale.sbatch`: QC of every clip, depth-based scale for the clips that need one,
+3. `sbatch scripts/metric_scale/run_metric_scale.sbatch`: QC of every clip, depth-based scale for the clips that need one,
    and the `qc` / `metric_scale` / `pose_source` fields of `manifest.jsonl`. See
    [Which poses to use](#which-poses-to-use-downstream).
 
 Logs of both jobs: `trajectories/_pipeline/logs/`. To try the pipeline on a handful of clips without touching
 the real output, give the first job a small manifest and a scratch output folder:
-`sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch`
+`sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/slam/run_full_dataset.sbatch`
 (link `_osm_extracts` into `$TRAJ_ROOT` for GPS fusion).
 
 **Model weights.** The SLAM loop closure needs `dino_salad.ckpt` and the DINOv2 `torch.hub` repo in a torch hub
@@ -137,7 +142,7 @@ trajectories/
 
 Transient: the per-clip depth-scale files (`metric_scale.npz`, with the SLAM rerun's poses and per-frame scales) are
 written to `$SCRATCH/natix_metric_scale_work/` (`--work_dir`) by stage 3 and merged into the zips by stage 4; delete
-that folder whenever you like. To run on new data: run `batch_infer.py`, then `sbatch scripts/run_metric_scale.sbatch`.
+that folder whenever you like. To run on new data: run `batch_infer.py`, then `sbatch scripts/metric_scale/run_metric_scale.sbatch`.
 
 ## Which poses to use (downstream)
 
@@ -152,7 +157,7 @@ outcome so consumers never need to re-derive it:
 | 4 | Merge into clip files | `integrate_metric_scale.py` | adds `metric_scale`, `metric_poses`, `metric_scale_json` to the clip's own `result.npz` (inside the session zips) |
 | 5 | Merge into manifest | `update_manifest_metric_scale.py` | adds `qc`, `metric_scale`, `scale_check`, `pose_source`, `pose_source_reason` to every `manifest.jsonl` row |
 
-Stages 2-5 are `scripts/run_metric_scale.sbatch`. QC routes (`scripts/clip_qc.py`; thresholds are in the script,
+Stages 2-5 are `scripts/metric_scale/run_metric_scale.sbatch`. QC routes (`scripts/metric_scale/clip_qc.py`; thresholds are in the script,
 their evidence in [memory/qc-thresholds-rationale.md](memory/qc-thresholds-rationale.md)):
 
 - `ego_failed`: SLAM itself is unusable: a jump/divergence, or < 4 keyframes in a clip that did move.
@@ -178,7 +183,7 @@ The cross-check (`scale_check` in the manifest) compares the depth scale with th
 0.8-1.25 `confirmed`, 0.67-0.8 or 1.25-1.5 `ambiguous`, outside 0.67-1.5 `contradicted`, `unavailable` without a
 usable depth scale. Clips stay `fused` unless contradicted; for a contradicted clip neither estimate is trusted
 (`pose_source` `none`), except when GPS fit and GPS length outvote the depth scale. Rules in detail:
-`scripts/update_manifest_metric_scale.py`; how well it works and clip counts per category:
+`scripts/metric_scale/update_manifest_metric_scale.py`; how well it works and clip counts per category:
 [memory/qc-validation.md](memory/qc-validation.md), [memory/dataset-snapshot-2026-10.md](memory/dataset-snapshot-2026-10.md).
 
 The full manifest schema and notes on using the fields: [docs/manifest-schema.md](docs/manifest-schema.md).
@@ -214,7 +219,7 @@ print(result["slam_translations"].shape)   # (n_frames, 3)
 print(result["gps_fusion_info"])           # None, or {"status": ..., "map_match_error_mean_m": ..., ...}
 ```
 
-At batch-pipeline scale (`scripts/batch_infer.py --dataset_root ...`), a whole finished recording session's directory (every clip that shares one `FIXED_METADATA.json`/undistort cache) may have since been archived into a single `Session.zip` by `scripts/pack_sessions.py`, to keep the output tree's inode count down — see that script's docstring. A packed clip's own directory no longer exists on disk, so reach it through the zip instead of assuming the loose path is always there:
+At batch-pipeline scale (`scripts/slam/batch_infer.py --dataset_root ...`), a whole finished recording session's directory (every clip that shares one `FIXED_METADATA.json`/undistort cache) may have since been archived into a single `Session.zip` by `scripts/slam/pack_sessions.py`, to keep the output tree's inode count down — see that script's docstring. A packed clip's own directory no longer exists on disk, so reach it through the zip instead of assuming the loose path is always there:
 
 ```python
 import io

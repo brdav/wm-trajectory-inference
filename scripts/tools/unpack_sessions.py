@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reverses scripts/pack_sessions.py: extracts a packed Country/Date/Session.zip back to a
+"""Reverses scripts/slam/pack_sessions.py: extracts a packed Country/Date/Session.zip back to a
 loose Country/Date/Session/ directory and removes the zip. Needed before anything that reads or
 rewrites an individual clip's result.npz by path (a plot/diagnose script, a future
 scripts/tools/refuse_gps.py sweep) can touch a packed session again -- see

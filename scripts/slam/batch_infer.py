@@ -6,14 +6,14 @@ Designed to be launched
 once inside an allocation that already has the vggtslam_image container attached, e.g.:
 
     # Single clip:
-    srun --environment=vggtslam_env_ext python scripts/batch_infer.py \\
+    srun --environment=vggtslam_env_ext python scripts/slam/batch_infer.py \\
         --video /capstor/.../FRONT_FOLDER/FRONT_2025-09-10_17-04-42.mp4 \\
         --out_dir /capstor/store/cscs/swissai/ab036/.../poses_out/france \\
         --num_gpus 1
 
-    # Everything listed in the dataset's sample manifest (what scripts/run_full_dataset.sbatch does; the
+    # Everything listed in the dataset's sample manifest (what scripts/slam/run_full_dataset.sbatch does; the
     # manifest, dataset root and output root default to the natix locations, see vggt_slam/sample_manifest.py):
-    srun --environment=vggtslam_env_ext python scripts/batch_infer.py --num_gpus 4
+    srun --environment=vggtslam_env_ext python scripts/slam/batch_infer.py --num_gpus 4
 
 Architecture:
   - One persistent GPU worker process per GPU (--num_gpus x --workers_per_gpu), each loading
@@ -39,7 +39,7 @@ Architecture:
     dataset tree. Already-processed clips are skipped, so a run that hits the Slurm wall-time limit can
     simply be resubmitted to pick up where it left off: a clip counts as done if it has a loose
     result.npz, an ok row in <out_root>/manifest.jsonl, or its result.npz inside its session's
-    zip (scripts/pack_sessions.py archives finished sessions).
+    zip (scripts/slam/pack_sessions.py archives finished sessions).
   - GPS/road-fusion (vggt_slam/fusion.py) is ON by default: it map-matches against the
     pre-downloaded OSM region extracts, using each video's sibling FRONT_*.csv automatically (no registry --
     just same basename, .csv extension). Pass --no-gps_fusion to skip it
@@ -79,7 +79,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
-REPO_DIR = Path(__file__).resolve().parent.parent
+REPO_DIR = Path(__file__).resolve().parents[2]
 
 # open3d's compiled pybind extension can fail to load in this container with "cannot allocate
 # memory in static TLS block" (glibc's default static-TLS surplus is too small for aarch64 +
@@ -332,7 +332,7 @@ def build_arg_parser():
     p.add_argument("--osm_extracts_dir", type=str, default=None,
                    help="Dir of pre-downloaded whole-region OSM extracts, one per dataset country "
                         "(and per US state), named e.g. Austria.osm.pbf / 'United States_New "
-                        "York.osm.pbf' -- see scripts/download_osm_extracts.py. GPS fusion requires "
+                        "York.osm.pbf' -- see scripts/setup/download_osm_extracts.py. GPS fusion requires "
                         "a matching extract for a clip's own region; if none is found here, that "
                         "clip's GPS fusion is skipped (non-fatally). Default in --dataset_root/"
                         "batch mode: {out_root}/_osm_extracts; in --video/single-clip mode: none "

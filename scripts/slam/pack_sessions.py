@@ -7,14 +7,14 @@ that clip's own file count was already cut to 1-2 by save_result_npz) down to on
 session, on top of the per-clip consolidation already in place.
 
 Archival, not transparent -- see vggt_slam/session_pack.py's docstring for why. A packed session
-is meant to be done for good: scripts/batch_infer.py's clips_to_process finds a clip's result inside the
+is meant to be done for good: scripts/slam/batch_infer.py's clips_to_process finds a clip's result inside the
 session zip and does not reprocess it, but anything that reads/rewrites one clip's result.npz by path
 (plot/diagnose scripts, a future scripts/tools/refuse_gps.py sweep) just gets FileNotFoundError against
 a packed session until it's restored with scripts/tools/unpack_sessions.py (the metric-scale pipeline reads
 and updates the zips directly).
 
 Which sessions exist and which clips belong to them comes from the dataset's sample manifest (the same
-list scripts/batch_infer.py processes, via vggt_slam/sample_manifest.py); the dataset tree is not walked.
+list scripts/slam/batch_infer.py processes, via vggt_slam/sample_manifest.py); the dataset tree is not walked.
 
 A session directory is packed only once ALL of:
   1. Complete: every source video of that session listed in the sample manifest has a result.npz,
@@ -35,8 +35,8 @@ Sessions are independent, so it is safe to run several invocations concurrently 
 
 Usage (dry run first -- packing deletes the original directory once its zip is verified; the dataset root,
 output root and manifest default to the natix locations):
-    python3 scripts/pack_sessions.py --dry_run
-    python3 scripts/pack_sessions.py --min_age_days 0 [--countries Switzerland Croatia]
+    python3 scripts/slam/pack_sessions.py --dry_run
+    python3 scripts/slam/pack_sessions.py --min_age_days 0 [--countries Switzerland Croatia]
 
 Appends one record per packed session to --out_root/packed_sessions.jsonl (same append-only
 convention as batch_infer.py's own manifest.jsonl).
@@ -50,7 +50,7 @@ import time
 import zipfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (vggt_slam package)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # repo root (vggt_slam package)
 from vggt_slam.paths import DATASET_ROOT, SAMPLE_MANIFEST, TRAJ_ROOT  # noqa: E402
 from vggt_slam.sample_manifest import source_videos  # noqa: E402
 

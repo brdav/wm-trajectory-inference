@@ -23,7 +23,7 @@ so an interrupted run can simply be rerun. One line per clip goes to <pipeline_d
 Treat the scale as ~+-10% accurate (validation: memory/qc-validation.md).
 
 Run inside the container, e.g.:
-    srun --environment=vggtslam_env_ext python3 scripts/estimate_metric_scale.py \\
+    srun --environment=vggtslam_env_ext python3 scripts/metric_scale/estimate_metric_scale.py \\
         --qc_csv <pipeline_dir>/clip_qc.csv --num_gpus 4 --workers_per_gpu 2
 Needs dino_salad.ckpt + the DINOv2 hub repo in torch.hub's cache (same as batch_infer.py) and the
 DA3METRIC-LARGE weights (HF_HOME, or network access to download them).
@@ -42,7 +42,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_DIR = Path(__file__).resolve().parent.parent
+REPO_DIR = Path(__file__).resolve().parents[2]
 
 # open3d fails to load in this container ("cannot allocate memory in static TLS block") unless
 # this is set before the worker processes are spawned -- same fix and reason as batch_infer.py.
@@ -62,7 +62,7 @@ BOTTOM_CROP_FRAC = 0.85  # ignore the bottom 15% of the image (hood)
 def candidate_clips(args):
     """(clip_id, label) for every clip that should get a depth-based scale.
 
-    With --qc_csv (the normal pipeline, see run_metric_scale.sbatch): every clip scripts/clip_qc.py
+    With --qc_csv (the normal pipeline, see run_metric_scale.sbatch): every clip scripts/metric_scale/clip_qc.py
     routed to needs_metric_scale (SLAM is fine but there is no usable GPS scale: fusion
     failed/missing, or fused_poses look implausible) or needs_scale_check (fused_poses pass but
     are near a limit or unverifiable: the depth scale cross-checks them). Clips with a diverged SLAM trajectory
@@ -306,7 +306,7 @@ def main():
                          "line) instead of the QC/manifest selection. Use a separate --pipeline_dir and --work_dir for such "
                          "spot checks so they are not mixed into the production outputs.")
     ap.add_argument("--qc_csv", default=None,
-                    help="scripts/clip_qc.py output: process the clips it routed to needs_metric_scale "
+                    help="scripts/metric_scale/clip_qc.py output: process the clips it routed to needs_metric_scale "
                          "(recommended). Default: every clip whose gps_fusion status in --manifest is not 'ok'")
     ap.add_argument("--manifest", default=f"{TRAJ_ROOT}/manifest.jsonl")
     ap.add_argument("--dataset_root", default=DATASET_ROOT)

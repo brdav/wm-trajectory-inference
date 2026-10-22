@@ -9,7 +9,7 @@
 #SBATCH --output=/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/_pipeline/logs/%x_%j.log
 #SBATCH --signal=B:SIGUSR1@300
 #
-# Post-processing after scripts/batch_infer.py (run_full_dataset.sbatch). Full order:
+# Post-processing after scripts/slam/batch_infer.py (run_full_dataset.sbatch). Full order:
 #   1. batch_infer.py                  -> result.npz per clip + manifest.jsonl     (run_full_dataset.sbatch)
 #   2. clip_qc.py                      -> clip_qc.csv: per clip route use_fused / needs_scale_check / needs_metric_scale / static / ego_failed
 #   3. estimate_metric_scale.py        -> depth-based scale for needs_metric_scale + needs_scale_check clips (GPU)
@@ -17,7 +17,7 @@
 #   5. update_manifest_metric_scale.py -> qc + metric_scale entry on every manifest.jsonl row
 # This script is steps 2-5 (step 1 is its own job). Submit once, after step 1 is done:
 #
-#   sbatch scripts/run_metric_scale.sbatch
+#   sbatch scripts/metric_scale/run_metric_scale.sbatch
 #
 # Step 2 is skipped when clip_qc.csv is newer than manifest.jsonl (override: RERUN_QC=1); steps 4-5
 # only run once step 3 reports nothing left to process.
@@ -32,7 +32,7 @@
 # `--limit 8 --shuffle --pipeline_dir <somewhere else> --work_dir <somewhere else>` inside an allocation.
 #
 # To run the whole stage on another output folder (e.g. a scratch copy of a few clips), set TRAJ_ROOT (and WORK_DIR):
-#   sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,WORK_DIR=$SCRATCH/test_work scripts/run_metric_scale.sbatch
+#   sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,WORK_DIR=$SCRATCH/test_work scripts/metric_scale/run_metric_scale.sbatch
 # Every script it calls then reads and writes only under that folder (including its manifest.jsonl).
 #
 # Where things go: durable records (clip_qc.csv, manifest_metric_scale.jsonl, integration_log.jsonl, job logs, backups) in
@@ -55,13 +55,13 @@ PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
 WORK_DIR="${WORK_DIR:-${SCRATCH:-/tmp}/natix_metric_scale_work}"
 REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
 EDF_ENV="${EDF_ENV:-vggtslam_env_ext}"  # Pyxis environment (container image) the GPU steps run in; includes osmium for GPS fusion
-SELF="$REPO_DIR/scripts/run_metric_scale.sbatch"
+SELF="$REPO_DIR/scripts/metric_scale/run_metric_scale.sbatch"
 STOP_FILE="$PIPELINE_DIR/STOP"
 RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
 MAX_RESUBMITS=20
 QC_CSV="$PIPELINE_DIR/clip_qc.csv"
 CPU_PY="${CPU_PY:-/users/dbrggema/miniconda3/envs/wm_env/bin/python}"  # CPU-only steps (clip_qc, zip integration, manifest)
-EXTRA_ARGS="${EXTRA_ARGS:-}"  # override: sbatch --export=ALL,EXTRA_ARGS=--retry_failed scripts/run_metric_scale.sbatch
+EXTRA_ARGS="${EXTRA_ARGS:-}"  # override: sbatch --export=ALL,EXTRA_ARGS=--retry_failed scripts/metric_scale/run_metric_scale.sbatch
 
 # Torch hub cache with dino_salad.ckpt + the DINOv2 hub repo (the SLAM loop-closure model needs
 # both; ~/.cache/torch/hub currently lacks them) and the HF cache holding DA3METRIC-LARGE (it is
@@ -97,12 +97,12 @@ echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME; TRAJ
 # Step 2: per-clip QC, unless the CSV is already newer than the manifest it was built from
 if [ -n "${RERUN_QC:-}" ] || [ ! -f "$QC_CSV" ] || [ "$TRAJ_ROOT/manifest.jsonl" -nt "$QC_CSV" ]; then
     echo "=== $(date -Iseconds) step 2: clip_qc.py"
-    "$CPU_PY" "$REPO_DIR/scripts/clip_qc.py" --traj_root "$TRAJ_ROOT" --out "$QC_CSV" --workers 32 || { echo "clip_qc.py failed" >&2; exit 1; }
+    "$CPU_PY" "$REPO_DIR/scripts/metric_scale/clip_qc.py" --traj_root "$TRAJ_ROOT" --out "$QC_CSV" --workers 32 || { echo "clip_qc.py failed" >&2; exit 1; }
 else
     echo "=== step 2 skipped: $QC_CSV is up to date"
 fi
 
-srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/estimate_metric_scale.py" \
+srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/metric_scale/estimate_metric_scale.py" \
     --pipeline_dir "$PIPELINE_DIR" \
     --work_dir "$WORK_DIR" \
     --qc_csv "$QC_CSV" \
@@ -118,11 +118,11 @@ echo "=== $(date -Iseconds) job $SLURM_JOB_ID: estimate_metric_scale.py exited $
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo "=== nothing left to estimate, not resubmitting ==="
     echo "=== $(date -Iseconds) step 4: integrate_metric_scale.py"
-    "$CPU_PY" "$REPO_DIR/scripts/integrate_metric_scale.py" --work_dir "$WORK_DIR" --pipeline_dir "$PIPELINE_DIR" --traj_root "$TRAJ_ROOT" --workers 24 \
+    "$CPU_PY" "$REPO_DIR/scripts/metric_scale/integrate_metric_scale.py" --work_dir "$WORK_DIR" --pipeline_dir "$PIPELINE_DIR" --traj_root "$TRAJ_ROOT" --workers 24 \
         || { echo "integration had failures -- NOT updating the manifest" >&2; exit 1; }
     echo "=== the per-clip files in $WORK_DIR are transient (their data is now in the clips' result.npz and the manifest); delete the folder when you no longer need the rerun poses / per-frame scales"
     echo "=== $(date -Iseconds) step 5: update_manifest_metric_scale.py"
-    "$CPU_PY" "$REPO_DIR/scripts/update_manifest_metric_scale.py" --traj_root "$TRAJ_ROOT" --manifest "$TRAJ_ROOT/manifest.jsonl" --qc_csv "$QC_CSV" \
+    "$CPU_PY" "$REPO_DIR/scripts/metric_scale/update_manifest_metric_scale.py" --traj_root "$TRAJ_ROOT" --manifest "$TRAJ_ROOT/manifest.jsonl" --qc_csv "$QC_CSV" \
         --metric_manifest "$PIPELINE_DIR/manifest_metric_scale.jsonl" --integration_log "$PIPELINE_DIR/integration_log.jsonl" --workers 24
     echo "=== $(date -Iseconds) all steps done"
     exit 0

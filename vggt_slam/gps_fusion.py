@@ -415,7 +415,7 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
     implausible GPS-derived scale, no roads near the fixes, no usable raw-GPS route); vggt_slam/fusion.py
     maps their messages to manifest statuses.
 
-    osm_region_pbf_path: pre-downloaded OSM region extract (scripts/download_osm_extracts.py) the road
+    osm_region_pbf_path: pre-downloaded OSM region extract (scripts/setup/download_osm_extracts.py) the road
         network is cropped from, locally.
     fallback_region_pbf_path: one path or a list tried in order if the labeled region has no roads near the
         fixes (clips are sometimes filed under the wrong country; vggt_slam/regions.py).

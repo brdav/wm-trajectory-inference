@@ -1,5 +1,5 @@
 """Approximate geographic centroids of every non-US country/region this dataset spans (see
-scripts/download_osm_extracts.py's EUROPE_COUNTRIES/OTHER_REGIONS), used to order OSM-region
+scripts/setup/download_osm_extracts.py's EUROPE_COUNTRIES/OTHER_REGIONS), used to order OSM-region
 candidates by proximity to a clip's own GPS fixes -- see vggt_slam/regions.py's
 `region_candidates`. Mirrors vggt_slam/us_regions.py's approach and rationale for US states,
 generalized to countries once the same folder-mislabeling pattern was confirmed dataset-wide, not

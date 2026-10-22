@@ -9,7 +9,7 @@ says, per clip, where its metric scale comes from and how good it is:
                 step length of fused_poses / total step length of slam_poses (they differ by one
                 global similarity, so this ratio is the similarity's scale). Computed here by
                 reading each clip's result.npz from its session zip.
-  metric_depth  clips whose scale came from scripts/estimate_metric_scale.py (taken from that
+  metric_depth  clips whose scale came from scripts/metric_scale/estimate_metric_scale.py (taken from that
                 run's manifest): adds scale_p25 / scale_p75 / scale_rel_iqr (spread of the
                 per-frame estimates), n_frames_used (clips with few frames are weak evidence --
                 filter on it) and model. The scale was computed on a SLAM rerun; if its gauge
@@ -36,7 +36,7 @@ no gpu/pid.
 With --qc_csv every row also gets `pose_source` (fused / metric / none) and `pose_source_reason`:
 the single field downstream consumers should branch on (see pose_source() below).
 
-With --qc_csv (scripts/clip_qc.py's output) every row also gets a `qc` dict -- route
+With --qc_csv (scripts/metric_scale/clip_qc.py's output) every row also gets a `qc` dict -- route
 (use_fused / needs_metric_scale / ego_failed / no_result), slam_ok, slam_reason, n_keyframes,
 slam_valid_until_s, scale_ok, scale_reason. `qc.route` is the verdict to act on: a clip routed to
 needs_metric_scale whose depth-based scale is missing does NOT keep its (rejected) GPS scale as
@@ -45,16 +45,16 @@ needs_metric_scale whose depth-based scale is missing does NOT keep its (rejecte
 any, says nothing about whether the poses are usable.
 
 The entry is only derived data: for metric_depth clips the same numbers (plus metric_poses) are
-inside the clip's result.npz (see scripts/integrate_metric_scale.py). For gps_fusion clips the
+inside the clip's result.npz (see scripts/metric_scale/integrate_metric_scale.py). For gps_fusion clips the
 scale lives only here (it can be recomputed from the clip's own fused/slam poses).
 
 Writes --out (default: rewrite --manifest in place, atomically, after saving a timestamped .bak_<time> copy).
 Rows keep their order; every other field is unchanged. Idempotent.
 
 Usage:
-    python3 scripts/update_manifest_metric_scale.py --dry_run [--limit_sessions 200]
-    python3 scripts/update_manifest_metric_scale.py --out /tmp/manifest_new.jsonl     # review first
-    python3 scripts/update_manifest_metric_scale.py                                    # in place
+    python3 scripts/metric_scale/update_manifest_metric_scale.py --dry_run [--limit_sessions 200]
+    python3 scripts/metric_scale/update_manifest_metric_scale.py --out /tmp/manifest_new.jsonl     # review first
+    python3 scripts/metric_scale/update_manifest_metric_scale.py                                    # in place
 """
 import argparse
 import io
@@ -69,7 +69,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root (vggt_slam package)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (vggt_slam package)
 from vggt_slam import paths  # noqa: E402
 
 TRAJ_ROOT = paths.TRAJ_ROOT
@@ -407,7 +407,7 @@ def write_provenance(path, rows, qc_cfg, summary):
     git = lambda *a: subprocess.run(["git", "-C", here, *a], capture_output=True, text=True).stdout.strip()
     cfg = dict(created=datetime.datetime.now().isoformat(timespec="seconds"), manifest="manifest.jsonl",
                rows=len(rows), qc=qc_cfg,
-               depth_scale=dict(script="scripts/estimate_metric_scale.py", model="depth-anything/DA3METRIC-LARGE",
+               depth_scale=dict(script="scripts/metric_scale/estimate_metric_scale.py", model="depth-anything/DA3METRIC-LARGE",
                                 n_frames_requested=50, pcd_stride=3, process_res=504,
                                 agree_band=AGREE, contradicted_outside=CLEAR,
                                 confident_if=dict(min_frames=CONFIDENT_MIN_FRAMES, max_rel_iqr=CONFIDENT_MAX_REL_IQR),

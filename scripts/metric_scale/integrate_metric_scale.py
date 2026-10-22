@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge scripts/estimate_metric_scale.py's per-clip metric_scale.npz files into the clips' own
+"""Merge scripts/metric_scale/estimate_metric_scale.py's per-clip metric_scale.npz files into the clips' own
 result.npz inside the packed session zips, so each clip stays ONE file.
 
 For every clip with a metric_scale.npz under --work_dir, its result.npz inside
@@ -29,9 +29,9 @@ Safety (the zips are shared, archival and not otherwise backed up):
 One line per session is appended to <pipeline_dir>/integration_log.jsonl.
 
 Usage:
-    python3 scripts/integrate_metric_scale.py --work_dir $SCRATCH/natix_metric_scale_work \\
+    python3 scripts/metric_scale/integrate_metric_scale.py --work_dir $SCRATCH/natix_metric_scale_work \\
         --traj_root .../processed_datasets/natix/trajectories --dry_run
-    python3 scripts/integrate_metric_scale.py ... [--countries Austria] [--limit_sessions 2] [--workers 16]
+    python3 scripts/metric_scale/integrate_metric_scale.py ... [--countries Austria] [--limit_sessions 2] [--workers 16]
 """
 import argparse
 import copy
@@ -50,7 +50,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root (vggt_slam package)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (vggt_slam package)
 from vggt_slam.paths import PIPELINE_DIR, TRAJ_ROOT  # noqa: E402
 
 DEFAULT_WORK_DIR = os.path.join(os.environ.get("SCRATCH", "/tmp"), "natix_metric_scale_work")  # per-clip files from estimate_metric_scale.py

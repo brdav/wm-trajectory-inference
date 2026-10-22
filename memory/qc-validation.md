@@ -42,7 +42,7 @@ estimate is wrong; in some clips it was the depth scale.
 
 Draw a stratified sample of clips into a `clip_list.txt` (dataset-relative `.mp4` path, TAB,
 stratum label; the strata and sample sizes are in the spot-check script in git history, see
-above), score it with `scripts/estimate_metric_scale.py --clip_list ... --pipeline_dir <records
+above), score it with `scripts/metric_scale/estimate_metric_scale.py --clip_list ... --pipeline_dir <records
 dir> --work_dir <work dir>` (about 25 clips/min on a 4-GPU node), then compare each clip's depth
 scale with its GPS-fused scale (the spot-check script does this; its placement companion needs no
 GPU).

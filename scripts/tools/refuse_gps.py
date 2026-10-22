@@ -42,7 +42,7 @@ To pick a walltime-cut-off run back up without redoing already-recorded clips, a
 # imported in this process -- multiprocessing's default "fork" start method copies whatever
 # thread pool the PARENT already initialized, so this must happen here, at true module-import
 # time, not inside the worker function after the pool already forked. Same rationale as
-# scripts/batch_infer.py's gpu_worker (see its own docstring) -- 64 workers each independently
+# scripts/slam/batch_infer.py's gpu_worker (see its own docstring) -- 64 workers each independently
 # sizing a BLAS thread pool off the node's full core count would oversubscribe just as badly as
 # the GPU-worker case did, even though nothing here touches a GPU.
 import os
@@ -138,7 +138,7 @@ def refuse_one(clip):
                         fused_rotations=fused.get("rotations"), fused_translations=fused.get("translations"),
                         matched_line=fused.get("matched_line"), snapped=fused.get("snapped"),
                         gps_fusion_info=gps_fusion_info,
-                        # the depth-based metric scale (scripts/integrate_metric_scale.py) is independent of
+                        # the depth-based metric scale (scripts/metric_scale/integrate_metric_scale.py) is independent of
                         # GPS fusion: carry it over, don't drop it on rewrite
                         metric_scale=loaded.get("metric_scale"), metric_poses=loaded.get("metric_poses"),
                         metric_scale_info=loaded.get("metric_scale_info"))

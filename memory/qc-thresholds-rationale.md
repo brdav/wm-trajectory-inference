@@ -1,4 +1,4 @@
-# Evidence behind the QC thresholds (`scripts/clip_qc.py`, QC_VERSION 2026-10-21.1)
+# Evidence behind the QC thresholds (`scripts/metric_scale/clip_qc.py`, QC_VERSION 2026-10-21.1)
 
 Measured on the 2026-10 dataset (see [dataset-snapshot-2026-10.md](dataset-snapshot-2026-10.md),
 [qc-validation.md](qc-validation.md)). The code keeps only the rule; change a threshold -> bump

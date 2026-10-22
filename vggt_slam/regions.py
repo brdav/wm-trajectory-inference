@@ -2,7 +2,7 @@
 
 Clips are sometimes filed under the wrong country/state folder, so the region is chosen by where the
 clip's GPS fixes are (distance to the centroid tables in country_regions.py / us_regions.py), falling
-back to the folder-labeled region. Used by scripts/batch_infer.py and scripts/tools/refuse_gps.py.
+back to the folder-labeled region. Used by scripts/slam/batch_infer.py and scripts/tools/refuse_gps.py.
 """
 import csv
 import math
@@ -25,7 +25,7 @@ def folder_region(rel_path):
 
 def region_pbf_path(rel_path, osm_extracts_dir, region_name=None):
     """rel_path: a clip's video path relative to dataset_root. Returns the pre-downloaded
-    region extract's path (see scripts/download_osm_extracts.py's naming -- "United States"
+    region extract's path (see scripts/setup/download_osm_extracts.py's naming -- "United States"
     clips are keyed by "United States_<State>", every other country by its own name directly)
     if osm_extracts_dir is set AND that region's extract actually exists there, else None (GPS
     fusion is required to have a region extract -- see vggt_slam/pipeline.py's --osm_region_pbf_path -- so a

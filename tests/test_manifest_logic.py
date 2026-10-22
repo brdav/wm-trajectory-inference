@@ -1,4 +1,4 @@
-"""Cross-check, adjudication, pose_source and row normalization (scripts/update_manifest_metric_scale.py). CPU only."""
+"""Cross-check, adjudication, pose_source and row normalization (scripts/metric_scale/update_manifest_metric_scale.py). CPU only."""
 import pytest
 
 import update_manifest_metric_scale as U

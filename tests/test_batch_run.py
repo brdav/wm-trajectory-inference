@@ -1,4 +1,4 @@
-"""BatchRun's clip feeder (scripts/batch_infer.py): a failing clip selection must end the feed, not hang the run."""
+"""BatchRun's clip feeder (scripts/slam/batch_infer.py): a failing clip selection must end the feed, not hang the run."""
 import threading
 from pathlib import Path
 from types import SimpleNamespace

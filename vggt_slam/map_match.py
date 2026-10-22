@@ -136,7 +136,7 @@ def _build_spatial_index(region_pbf_path, index_path):
 def _extract_local_bbox(region_pbf_path, south, west, north, east, osm_path):
     """Crop the given WGS84 bbox's highway ways (+ their nodes) out of an already-downloaded
     whole-region OSM extract (a Geofabrik country/state .osm.pbf -- see
-    scripts/download_osm_extracts.py), via a SQLite R-tree spatial index built once per region
+    scripts/setup/download_osm_extracts.py), via a SQLite R-tree spatial index built once per region
     (see _build_spatial_index) and cached alongside the .osm.pbf itself, and save as OSM XML at
     osm_path. No network access at all.
     """
@@ -227,9 +227,9 @@ def build_network(center_lat, center_lon, map_buffer_m, to_utm, network_dir, reg
     different, bigger-need clip mapped to the same grid cell. Every clip's own precise
     map_buffer_m is used directly instead.
 
-    region_pbf_path: pre-downloaded whole-region extract (see scripts/download_osm_extracts.py)
+    region_pbf_path: pre-downloaded whole-region extract (see scripts/setup/download_osm_extracts.py)
     to crop locally -- see _extract_local_bbox. Required: this project's whole dataset has one
-    downloaded+indexed for every country/state it spans (see scripts/download_osm_extracts.py),
+    downloaded+indexed for every country/state it spans (see scripts/setup/download_osm_extracts.py),
     so there's no other source to fall back to.
 
     profile: "car" (default) imports via map-matching-2's own --osm-profile car, which also

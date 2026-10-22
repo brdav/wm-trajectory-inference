@@ -1,5 +1,5 @@
-"""SLAM stage for one clip: keyframe selection, submap SLAM, GPS fusion. Used by scripts/batch_infer.py
-(and scripts/estimate_metric_scale.py), which load the model once per GPU process and call run_video per clip."""
+"""SLAM stage for one clip: keyframe selection, submap SLAM, GPS fusion. Used by scripts/slam/batch_infer.py
+(and scripts/metric_scale/estimate_metric_scale.py), which load the model once per GPU process and call run_video per clip."""
 import glob
 import os
 import queue
