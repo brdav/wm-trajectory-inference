@@ -1,33 +1,19 @@
 # Dockerfile for VGGT-SLAM 2.0 inference
 # Build with:  podman build -t vggtslam_image .
 #
-# Target hardware: NVIDIA GH200 (Grace Hopper, linux/aarch64, sm_90). nvcr.io/nvidia/pytorch
-# images are multi-arch and ship CUDA/cuDNN/torch already built and tuned for this hardware,
-# so no conda is needed to get a CUDA-enabled torch on aarch64 (a plain `pip install torch`
-# on aarch64 is CPU-only - PyPI has no CUDA-enabled aarch64 torch wheel).
-#
-# open3d is the only remaining wrinkle: gtsam-develop (vggt_slam/solver.py's SL(4) pose-graph
-# backend) only ships aarch64 wheels from Python 3.11 onward, while open3d's aarch64 wheels on
-# PyPI stop at Python 3.11 (0.18.0; 0.19.0 dropped aarch64 entirely) - so Python 3.11 is the
-# only version where both have a ready-made wheel. No nvcr.io/nvidia/pytorch tag ships Python
-# 3.11 though (the series jumps straight from 3.10 to 3.12), so on this image's Python 3.12,
-# open3d has to be built from source (stage 1 below) while gtsam-develop still installs from a
-# plain pip wheel (it has a cp312/aarch64 one).
+# Target hardware: NVIDIA GH200 (linux/aarch64, sm_90). The nvcr.io/nvidia/pytorch base image ships CUDA, cuDNN and a
+# CUDA-enabled torch for it (PyPI has no CUDA aarch64 torch wheel). Its Python is 3.12, where gtsam-develop (the SL(4)
+# pose-graph backend) has an aarch64 wheel but open3d does not (PyPI's last aarch64 open3d is 0.18 / Python 3.11), so
+# open3d is built from source in stage 1.
 
 # ---- Stage 1: build an open3d wheel for cp312/aarch64 (no such wheel exists on PyPI) ----
 FROM nvcr.io/nvidia/pytorch:24.12-py3 AS open3d-builder
 ENV DEBIAN_FRONTEND=noninteractive
 ARG OPEN3D_REF=v0.19.0
 
-# Same C++ build deps as Open3D's own CI (util/install_deps_ubuntu.sh), minus the
-# clang/ninja/libsdl2-dev/libc++-dev/libxi-dev filament-only ones - BUILD_GUI=OFF below skips
-# compiling Filament (the GUI/visualization backend) entirely, and this pipeline never uses
-# open3d's visualization module (only PointCloud/voxel_down_sample/write_point_cloud). GLFW is
-# still built as a third-party dep even with BUILD_GUI=OFF though, and on this Ubuntu 24.04
-# base its CMake configure also probes for a Wayland backend - pkg-config/libwayland-dev/
-# libwayland-bin/wayland-protocols/libxkbcommon-dev satisfy that (install_deps_ubuntu.sh
-# doesn't need these since Open3D's own CI images are Ubuntu 20.04, predating GLFW's Wayland
-# support probe).
+# Open3D's own CI build deps, minus the Filament-only ones: BUILD_GUI=OFF below skips Filament, and this pipeline only
+# uses open3d's PointCloud (voxel_down_sample, write_point_cloud). The wayland/xkbcommon packages are for GLFW's
+# CMake configure, which probes for a Wayland backend on this Ubuntu 24.04 base.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         xorg-dev \
@@ -53,15 +39,8 @@ RUN pip install --no-cache-dir cmake
 RUN git clone --depth 1 --branch ${OPEN3D_REF} https://github.com/isl-org/Open3D.git /opt/open3d-src
 WORKDIR /opt/open3d-src
 
-# BUILD_SHARED_LIBS/CUDA/PYTORCH_OPS/TENSORFLOW_OPS/SYCL=OFF matches Open3D's own arm64 release
-# wheel config (docker/docker_build.sh's openblas_export_env()). BUILD_GUI=OFF is our own
-# addition on top of that (see comment above) - this is a headless compute node, so there's no
-# working display for the GUI to use even if it were built.
-#
-# Deliberately NOT -GNinja: Open3D's own build (docker/Dockerfile.ci) uses the default Unix
-# Makefiles generator, and its OpenBLAS third-party build is wired as a Makefiles-style
-# ExternalProject step - under Ninja it fails with "'openblas/lib/libopenblas.a' ... missing
-# and no known rule to make it" because that step's output isn't declared as a Ninja byproduct.
+# Open3D's own arm64 wheel config, plus BUILD_GUI=OFF (headless compute node). Deliberately not -GNinja: Open3D's
+# OpenBLAS ExternalProject step is wired for Makefiles and fails under Ninja ("libopenblas.a missing and no known rule").
 RUN cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
