@@ -2,17 +2,17 @@
 """Reverses scripts/pack_sessions.py: extracts a packed Country/Date/Session.zip back to a
 loose Country/Date/Session/ directory and removes the zip. Needed before anything that reads or
 rewrites an individual clip's result.npz by path (a plot/diagnose script, a future
-scripts/refuse_gps.py sweep) can touch a packed session again -- see
+scripts/tools/refuse_gps.py sweep) can touch a packed session again -- see
 vggt_slam/session_pack.py's docstring for why packing doesn't try to stay transparently
 read/write-able instead.
 
 Usage:
     # a single session, path relative to --out_root (.zip suffix optional):
-    python3 scripts/unpack_sessions.py --out_root .../natix_traj/trajectories \\
+    python3 scripts/tools/unpack_sessions.py --out_root .../natix_traj/trajectories \\
         --session "Switzerland/2025-10-06/2025-10-06_1affc082-e589-4605-a6d2-89404f7241bc_3"
 
     # every packed session under given countries (all countries if --countries is omitted):
-    python3 scripts/unpack_sessions.py --out_root .../natix_traj/trajectories --countries Croatia
+    python3 scripts/tools/unpack_sessions.py --out_root .../natix_traj/trajectories --countries Croatia
 """
 import argparse
 import zipfile

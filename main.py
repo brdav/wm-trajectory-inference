@@ -446,8 +446,8 @@ def run_video(args, backend, device, clip_model=None, clip_preprocess=None, clip
                     # rows excluded). Logged into manifest.jsonl so a bad fit (wrong-junction
                     # match, a fit anchored to too few/poorly-conditioned GPS correspondences,
                     # ...) is queryable/sortable across the whole dataset without re-opening
-                    # every clip's own artifacts -- see scripts/plot_road_alignment*.py, which
-                    # compute + print the same number for one clip at a time.
+                    # every clip's own artifacts (for one clip it can be recomputed from its
+                    # result.npz: fused poses vs the snapped route).
                     traj_en = fused_trans[:, [0, 2]]
                     snapped_ok = ~np.isnan(snapped[:, 0])
                     if snapped_ok.any():
@@ -479,7 +479,7 @@ def run_video(args, backend, device, clip_model=None, clip_preprocess=None, clip
                 # failures rather than ever returning normally with region_used=None (an earlier
                 # version of the code above had a now-removed elif branch for that case, which
                 # was actually unreachable) -- give each its own structured status, same as
-                # scripts/refuse_gps.py's matching except-ValueError branch, instead of burying
+                # scripts/tools/refuse_gps.py's matching except-ValueError branch, instead of burying
                 # them in the generic "failed" bucket below where only a traceback grep
                 # distinguishes them. Confirmed this was previously happening at real scale:
                 # ~72% of all "failed" gps_fusion records in one manifest.jsonl audit were

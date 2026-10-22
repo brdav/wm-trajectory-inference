@@ -54,8 +54,8 @@ _METERS_PER_DEGREE = 111_320.0
 
 def _parse_osm_edges(osm_path, to_utm):
     """Parses the raw OSM XML at osm_path into a list of shapely LineStrings (projected to UTM
-    meters via to_utm) -- one per `highway` way -- for the plotted gray road-network backdrop
-    (scripts/plot_road_alignment.py). Not used by matching itself (map-matching-2's own --prepare
+    meters via to_utm) -- one per `highway` way -- for a plotted gray road-network backdrop
+    (the plotting script that used it was removed). Not used by matching itself (map-matching-2's own --prepare
     reads the OSM XML directly); this is a lightweight, dependency-free (stdlib ElementTree)
     stand-in for what osmnx/geopandas used to hand back from this module's previous fmm-based
     implementation.
@@ -190,8 +190,8 @@ def trim_osm_network_cache(network_dir):
     results/ are pure map_matching_2 working files with no lasting value once fusion is done --
     `--prepare` costs milliseconds to rebuild from network.osm, and network.osm itself is
     trivial to re-crop from the region PBF's own spatial index (see build_network's docstring)
-    -- but network.osm is kept since scripts/plot_road_alignment_standalone.py's grey
-    road-network backdrop reads it directly, and it's the cheapest piece to keep around
+    -- but network.osm is still kept (a plotting script that has since been removed read it;
+    nothing in the pipeline reads it now), and it's the cheapest piece to keep around
     (a few hundred KB vs. the prepared binary graphs, which are usually the bulk of this
     directory). No-op if network_dir doesn't exist (e.g. GPS fusion was never attempted).
     """

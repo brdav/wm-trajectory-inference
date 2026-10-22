@@ -378,8 +378,8 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
     primary leg, so this final pass is not optional bookkeeping the way it might look; it's the
     only place the excluded segment (if any) and the reported route/snapped positions ever get
     computed together. Both None if map-matching-2 never found a match on the full trajectory.
-    Saved by main.py alongside fused_rot/fused_trans so scripts/plot_road_alignment.py can plot
-    them without re-running this whole function.
+    Saved by main.py alongside fused_rot/fused_trans so the road alignment can be plotted
+    without re-running this whole function.
     region_used is whichever of osm_region_pbf_path / fallback_region_pbf_path actually had roads
     near the GPS fixes (None if none did) -- main.py records this in the manifest.
     network_profile is "car" or "manual_drivable" -- whichever build_network profile actually won
@@ -503,7 +503,7 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
         # network at all near the GPS fixes, in the labeled region or any fallback" -- a different
         # root cause (bad/missing OSM coverage for this location) that a caller should be able to
         # tell apart from "roads exist but the GPS track itself couldn't be routed through them"
-        # (see scripts/refuse_gps.py's own classification of these two ValueErrors).
+        # (see scripts/tools/refuse_gps.py's own classification of these two ValueErrors).
         raise ValueError(
             f"no roads found near the GPS fixes in {osm_region_pbf_path} or any fallback region "
             f"({fallback_region_pbf_path})"

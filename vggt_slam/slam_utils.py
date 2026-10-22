@@ -58,7 +58,7 @@ def save_result_npz(path, frame_ids, slam_rotations, slam_translations, extracti
     the slam poses with translation * metric_scale (N,4,4), and a dict of provenance/quality
     stats (stored as JSON). Kept separate from fused_* on purpose: fused_poses are GPS/road
     grounded, these are an estimate from monocular metric depth. Anything that rewrites an
-    existing result.npz (e.g. scripts/refuse_gps.py) must pass these through or they are lost.
+    existing result.npz (e.g. scripts/tools/refuse_gps.py) must pass these through or they are lost.
 
     gps_fusion_info: the same dict already returned to callers and written to manifest.jsonl
     (status, region_used, network_profile_used, matched_keyframes, total_keyframes,

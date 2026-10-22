@@ -9,8 +9,8 @@ session, on top of the per-clip consolidation already in place.
 Archival, not transparent -- see vggt_slam/session_pack.py's docstring for why. A packed session
 is meant to be done for good: scripts/batch_infer.py's discover_clips finds a clip's result inside the
 session zip and does not reprocess it, but anything that reads/rewrites one clip's result.npz by path
-(plot/diagnose scripts, a future scripts/refuse_gps.py sweep) just gets FileNotFoundError against
-a packed session until it's restored with scripts/unpack_sessions.py (the metric-scale pipeline reads
+(plot/diagnose scripts, a future scripts/tools/refuse_gps.py sweep) just gets FileNotFoundError against
+a packed session until it's restored with scripts/tools/unpack_sessions.py (the metric-scale pipeline reads
 and updates the zips directly).
 
 Which sessions exist and which clips belong to them comes from the dataset's sample manifest (the same

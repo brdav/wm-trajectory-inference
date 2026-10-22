@@ -30,12 +30,12 @@ parallelism than the original 16-GPU-worker pipeline.
 
 Usage (inside the vggtslam_env container -- needs osmium + the map_matching_2 binary):
     pip install --quiet osmium   # once, before this script's own workers fork (see main())
-    python3 scripts/refuse_gps.py --dataset_root .../datasets/natix --out_root .../natix_traj \\
+    python3 scripts/tools/refuse_gps.py --dataset_root .../datasets/natix --out_root .../natix_traj \\
         [--num_workers 64] [--limit 20] [--countries Belgium Austria]
 
 To pick a walltime-cut-off run back up without redoing already-recorded clips, add --resume
 (pointing --manifest_path, if given explicitly, at the SAME file the interrupted run wrote to):
-    python3 scripts/refuse_gps.py --dataset_root .../datasets/natix --out_root .../natix_traj \\
+    python3 scripts/tools/refuse_gps.py --dataset_root .../datasets/natix --out_root .../natix_traj \\
         --resume
 """
 # Cap each worker's math-library thread pool BEFORE numpy (or anything that pulls it in) is ever
@@ -57,9 +57,9 @@ import time
 import traceback
 from pathlib import Path
 
-REPO_DIR = Path(__file__).resolve().parent.parent
+REPO_DIR = Path(__file__).resolve().parents[2]  # scripts/tools/ -> repo root
 sys.path.insert(0, str(REPO_DIR))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(REPO_DIR / "scripts"))  # batch_infer
 
 
 def discover_refusion_candidates(dataset_root, out_root, countries=None, limit=None, clip_ids=None):

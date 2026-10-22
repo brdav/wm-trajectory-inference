@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run VGGT-SLAM trajectory inference on a video clip, or batch over many clips using all GPUs
 on the node in parallel. The sole entry point for turning a natix-style clip (or dataset of
-them) into poses -- scripts/run_video_to_poses.sh is now a thin wrapper around this for the
-single-clip case (clip-name shortcuts + optional GPS-fusion plotting). Designed to be launched
+them) into poses: a single clip (--video/--out_dir) or every video of the sample manifest.
+Designed to be launched
 once inside an allocation that already has the vggtslam_image container attached, e.g.:
 
     # Single clip:
@@ -19,7 +19,7 @@ Architecture (see conversation / README for the "why"):
   - One persistent GPU worker process per GPU (--num_gpus x --workers_per_gpu), each loading
     the geometry model ONCE and then looping over many clips pulled from a shared queue --
     this avoids the model-reload cost that a fresh `python main.py` per clip would pay on every
-    single clip (still paid once, unavoidably, in run_video_to_poses.sh's single-clip mode).
+    single clip (still paid once, unavoidably, in single-clip mode).
     Per-clip GPU compute is bursty
     (~1s forward pass per submap; most of a clip's wall-clock is CPU-side pipeline/
     orchestration work, not the GPU), so a single worker per physical GPU tends to leave it

@@ -14,7 +14,7 @@ Below are the commands used to process Natix:
 | Process every source video in the dataset's sample manifest (self-resubmitting until done, packs the output into session zips at the end) | `sbatch scripts/run_full_dataset.sbatch` |
 | Then: QC, depth-based metric scale for clips without a usable GPS scale, merge into `result.npz` + `manifest.jsonl` | `sbatch scripts/run_metric_scale.sbatch` |
 | Download OSM road-network extracts (once, and for any new country, before GPS fusion) | `python scripts/download_osm_extracts.py --out_dir <dir>` |
-| Take a packed session apart again to edit it | `python scripts/unpack_sessions.py ...` |
+| Take a packed session apart again to edit it | `python scripts/tools/unpack_sessions.py ...` |
 
 New data? See [Processing new data](#processing-new-data).
 
@@ -28,6 +28,23 @@ skipped. Which videos to process comes from a sample manifest (below), so for an
 parquet with a `source_video_path` column (paths relative to `--dataset_root`, laid out as
 `<Country>/.../<session>/<HH-MM-SS>/FRONT_FOLDER/<video>.mp4`) and pass `--dataset_root`, `--out_root` and
 `--sample_manifest` (or the `DATASET_ROOT` / `OUT_ROOT` / `SAMPLE_MANIFEST` environment variables of the sbatch).
+
+## Scripts layout
+
+```
+scripts/                            the pipeline (what you run to process data)
+  run_full_dataset.sbatch             stage 1: SLAM + GPS fusion for every video of the sample manifest, then packs session zips
+  run_metric_scale.sbatch             stage 2: QC, depth-based scale, merge into result.npz + manifest.jsonl
+  batch_infer.py  pack_sessions.py                                     called by stage 1
+  clip_qc.py  estimate_metric_scale.py  integrate_metric_scale.py  update_manifest_metric_scale.py   called by stage 2
+  download_osm_extracts.py            setup: OSM road extracts for GPS fusion (once, and for any new country)
+scripts/tools/                      maintenance and visualization, not needed to process data
+  unpack_sessions.py                  restore a packed session zip to a loose folder
+  refuse_gps.py                       rerun GPS fusion only, on already processed clips
+  overlay_trajectory_on_video.py      draw a clip's future trajectory onto its video
+scripts/osm_maps/                   separate product: ego-centred OSM map images for the clips (consumes the fused trajectories)
+  osm_bev.py  make_osm_maps.py  make_osm_report.py  run_osm_prepare.sbatch  run_osm_maps.sbatch
+```
 
 ## Processing new data
 
@@ -157,7 +174,7 @@ for a clip flagged only for its map-matching error, the raw GPS track length alr
 One JSON object per source video, **always with exactly these keys** (null when a key does not apply; nested objects
 always have all of their keys too). Written by `batch_infer.py` (first block) and completed by
 `scripts/update_manifest_metric_scale.py` (rest), which also normalizes every row to this schema. Older rows from
-before the schema were repaired by `scripts/backfill_manifest.py`.
+before the schema existed were repaired once, by one-off scripts that were removed afterwards (last version: git commit `61e6655`).
 
 | key | content |
 |---|---|
@@ -211,8 +228,7 @@ for line in open(".../trajectories/manifest.jsonl"):
 
 ## QC validation (how good is the QC?)
 
-All numbers 2026-10-21, measured with `scripts/qc_validation/` (the raw clip lists, scores and figures were not kept; rerunning
-needs a GPU run, see "Reproduce"). The only independent reference
+All numbers 2026-10-21, measured with two analysis scripts that were removed afterwards (last version: `git show 61e6655:scripts/qc_validation/qc_depth_spotcheck.py` and `.../qc_placement.py`; the raw clip lists, scores and figures were not kept, rerunning needs a GPU run, see "Reproduce"). The only independent reference
 for a clip's scale is the depth-based one (DA3METRIC-LARGE vs the SLAM point cloud), so every statement below
 is "the two estimates agree / clearly disagree" (ratio depth/GPS in 0.8-1.25 / outside 0.67-1.5), never ground
 truth. A disagreement does not say which estimate is wrong; in some clips it was the depth scale.
@@ -238,11 +254,10 @@ truth. A disagreement does not say which estimate is wrong; in some clips it was
 - **Limits:** one sample, one pool, depth scale +-8-10%; the rates above were measured on confident depth
   estimates only (9% of the sample had noisy ones and are not covered); `static` and `too_few_keyframes` clips were checked against GPS extent only, not against depth.
 
-Reproduce: draw a stratified sample of clips into a `clip_list.txt` (dataset-relative `.mp4` path, TAB, stratum label; the
-strata and sample sizes are in `scripts/qc_validation/qc_depth_spotcheck.py`), score it with
-`scripts/estimate_metric_scale.py --clip_list ... --pipeline_dir $QC_VALIDATION_DIR/records --work_dir $QC_VALIDATION_DIR/metric`
-(about 25 clips/min on a 4-GPU node), then `QC_VALIDATION_DIR=... python scripts/qc_validation/qc_depth_spotcheck.py`
-(and `qc_placement.py`, which needs no GPU).
+Reproduce: draw a stratified sample of clips into a `clip_list.txt` (dataset-relative `.mp4` path, TAB, stratum label; the strata and
+sample sizes are in the spot-check script in git history, see above), score it with
+`scripts/estimate_metric_scale.py --clip_list ... --pipeline_dir <records dir> --work_dir <work dir>` (about 25 clips/min on a 4-GPU node),
+then compare each clip's depth scale with its GPS-fused scale (the spot-check script does this; its placement companion needs no GPU).
 
 ### Traceability
 

@@ -48,7 +48,7 @@ from scipy.spatial.transform import Rotation, RotationSpline, Slerp
 
 def extract_background_frames(clip_dir, fps, out_dir):
     """Extract front-camera frames directly from the clip's own raw video at `fps`, for the
-    overlay's background. run_video_to_poses.sh's own extracted frames (frames/frame_%05d.jpg)
+    overlay's background. batch_infer.py's own extracted frames (frames/frame_%05d.jpg)
     are only as dense as --extraction_fps and, more importantly, keyframe-selected (most were
     dropped before VGGT-SLAM ever saw them) - reusing those and just holding each one for
     several output frames would make the *visible scene* jump at each surviving keyframe, even
@@ -489,8 +489,8 @@ def main():
     frame_ids = posez["frame_ids"]
     extraction_fps = float(posez["extraction_fps"])
 
-    # Submap-boundary frames are logged twice under the same frame_id (see
-    # compare_pose_trajectories.py's load_trajectory for the same dedup, same reason) -- keeping
+    # Submap-boundary frames are logged twice under the same frame_id (the
+    # same dedup is needed wherever poses are read from a result.npz) -- keeping
     # both would give a zero time gap between them, which CubicSpline/RotationSpline reject
     # outright (they require strictly increasing x).
     _, first_idx = np.unique(frame_ids, return_index=True)
