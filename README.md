@@ -29,6 +29,12 @@ parquet with a `source_video_path` column (paths relative to `--dataset_root`, l
 `<Country>/.../<session>/<HH-MM-SS>/FRONT_FOLDER/<video>.mp4`) and pass `--dataset_root`, `--out_root` and
 `--sample_manifest` (or the `DATASET_ROOT` / `OUT_ROOT` / `SAMPLE_MANIFEST` environment variables of the sbatch).
 
+## Repository layout
+
+`vggt_slam/` is the library, `scripts/` the pipeline, `docs/` reference documentation, and `memory/` dated
+measurements and investigation notes (validation results, dataset snapshots, rationale for thresholds) that are
+deliberately kept out of the docs and the code comments; see [memory/README.md](memory/README.md).
+
 ## Scripts layout
 
 ```
@@ -53,7 +59,7 @@ The pipeline has two sbatch jobs, run one after the other; everything is resumab
 **What drives it: the sample manifest.** `/capstor/store/cscs/swissai/ab036/processed_datasets/natix/manifest/samples_24fps.parquet`
 (also available hive-partitioned as `manifest/samples_24fps/country=*/part.parquet`) lists the dataset's 5 s samples;
 its `source_video_path` column names the full source video of each. The pipeline processes whole source videos,
-so the work list is the set of unique `source_video_path`s (120,026 today). The dataset tree is never walked and
+so the work list is the set of unique `source_video_path`s. The dataset tree is never walked and
 no path cache exists. Read via `vggt_slam/sample_manifest.py`.
 
 **To process more data**
@@ -137,13 +143,14 @@ outcome so consumers never need to re-derive it:
 | 4 | Merge into clip files | `integrate_metric_scale.py` | adds `metric_scale`, `metric_poses`, `metric_scale_json` to the clip's own `result.npz` (inside the session zips) |
 | 5 | Merge into manifest | `update_manifest_metric_scale.py` | adds `qc`, `metric_scale`, `scale_check`, `pose_source`, `pose_source_reason` to every `manifest.jsonl` row |
 
-Stages 2-5 are `scripts/run_metric_scale.sbatch`. QC routes (`scripts/clip_qc.py`):
+Stages 2-5 are `scripts/run_metric_scale.sbatch`. QC routes (`scripts/clip_qc.py`; thresholds are in the script,
+their evidence in [memory/qc-thresholds-rationale.md](memory/qc-thresholds-rationale.md)):
 
 - `ego_failed`: SLAM itself is unusable: a jump/divergence, or < 4 keyframes in a clip that did move.
-- `static`: < 4 keyframes **and** the raw GPS fixes span < 30 m, i.e. the vehicle barely moved (keyframe
-  selection needs motion). Not a failure; there is no meaningful trajectory or scale.
-- `needs_metric_scale`: SLAM is fine but there is no trusted GPS scale: no `fused_poses`, or they fail a
-  hard check (implied speed > 50 m/s, fused path > 1.5x the raw GPS track, GPS fusion found no road route).
+- `static`: < 4 keyframes **and** the raw GPS fixes span < 30 m, i.e. the vehicle barely moved. Not a failure;
+  there is no meaningful trajectory or scale.
+- `needs_metric_scale`: SLAM is fine but there is no trusted GPS scale: no `fused_poses`, or they fail a hard
+  check (implied speed > 50 m/s, fused path > 1.5x the raw GPS track, GPS fusion found no road route).
 - `needs_scale_check`: `fused_poses` pass the hard checks but sit near a limit or cannot be verified
   (fused/GPS path-length ratio < 0.8 or > 1.25, or no ratio computable, or mean map-matching error > 10 m).
   They are **cross-checked** against the depth-based scale.
@@ -151,71 +158,21 @@ Stages 2-5 are `scripts/run_metric_scale.sbatch`. QC routes (`scripts/clip_qc.py
 
 **Downstream code should branch on one field, `pose_source` in `trajectories/manifest.jsonl`:**
 
-| `pose_source` | use | clips (2026-10-20) | `pose_source_reason` |
-|---|---|---|---|
-| `fused` | `fused_poses` (GPS/road-fused, metric) | 109,230 (91.0%) | `gps_fusion` 105,063; after a cross-check: `gps_confirmed_by_depth` 3,161, `gps_ambiguous_vs_depth` 862, `gps_length_supports_fused` 112, `gps_unchecked` 32 |
-| `metric` | `metric_poses` (SLAM poses scaled by a depth-based estimate) | 9,016 (7.5%) | why GPS wasn't used: `no_fused_poses` 8,681, `implausible_speed` 217, `longer_than_gps` 68, `no_route_match` 50 |
-| `static` | nothing to use: ~stationary | 996 (0.8%) | `stationary` |
-| `none` | nothing usable | 784 (0.7%) | `scale_contradicted` 328, `slam_jump` 226, `too_few_keyframes` 208 (moved, or no GPS to verify), `no_calibration` 18, `rerun_poses_mismatch` 4 |
+| `pose_source` | use | `pose_source_reason` |
+|---|---|---|
+| `fused` | `fused_poses` (GPS/road-fused, metric) | `gps_fusion`; after a cross-check: `gps_confirmed_by_depth`, `gps_ambiguous_vs_depth`, `gps_length_supports_fused`, `gps_unchecked` |
+| `metric` | `metric_poses` (SLAM poses scaled by a depth-based estimate, about +-10%) | why GPS wasn't used: `no_fused_poses`, `implausible_speed`, `longer_than_gps`, `no_route_match` |
+| `static` | nothing to use: ~stationary | `stationary` |
+| `none` | nothing usable | `scale_contradicted`, `slam_jump`, `too_few_keyframes`, `no_calibration`, `rerun_poses_mismatch` |
 
-The cross-check (`scale_check` in the manifest: `depth_scale`, `ratio` = depth/GPS, `verdict`): `confirmed`
-(ratio 0.8-1.25), `ambiguous` (0.67-0.8 or 1.25-1.5), `contradicted` (outside 0.67-1.5), `unavailable`
-(no depth scale, or < 5 frames). `scale_check.confidence` is `high` when the per-frame depth estimates are
-consistent (`scale_rel_iqr` <= 0.25); then the verdict uses the median ratio. For noisy (`low`) estimates a clip is
-contradicted only if the whole interquartile range of its per-frame scales lies outside 0.67-1.5. Clips stay
-`fused` unless contradicted. For a contradicted clip we cannot tell which estimate is wrong (in a spot check the
-depth scale was sometimes the wrong one), so neither is trusted: `pose_source` is `none` -- with one exception:
-for a clip flagged only for its map-matching error, the raw GPS track length already agrees with the fused scale
-(fused/GPS length 0.8-1.25), so GPS fit and GPS length outvote the depth scale: `fused`,
-`gps_length_supports_fused` (112 clips; a judgement, not validated).
+The cross-check (`scale_check` in the manifest) compares the depth scale with the fused one: ratio depth/GPS
+0.8-1.25 `confirmed`, 0.67-0.8 or 1.25-1.5 `ambiguous`, outside 0.67-1.5 `contradicted`, `unavailable` without a
+usable depth scale. Clips stay `fused` unless contradicted; for a contradicted clip neither estimate is trusted
+(`pose_source` `none`), except when GPS fit and GPS length outvote the depth scale. Rules in detail:
+`scripts/update_manifest_metric_scale.py`; how well it works and clip counts per category:
+[memory/qc-validation.md](memory/qc-validation.md), [memory/dataset-snapshot-2026-10.md](memory/dataset-snapshot-2026-10.md).
 
-### manifest.jsonl row schema
-
-One JSON object per source video, **always with exactly these keys** (null when a key does not apply; nested objects
-always have all of their keys too). Written by `batch_infer.py` (first block) and completed by
-`scripts/update_manifest_metric_scale.py` (rest), which also normalizes every row to this schema. Older rows from
-before the schema existed were repaired once, by one-off scripts that were removed afterwards (last version: git commit `61e6655`).
-
-| key | content |
-|---|---|
-| `clip_id` | full path of the source video |
-| `ok` | `batch_infer.py` finished the clip. `false` + `error`/`stage` otherwise (null when `ok`) |
-| `seconds` | wall time of the clip's run (null for backfilled rows) |
-| `fixed_intrinsics` | the camera calibration of `FIXED_METADATA.json` was used (otherwise self-calibrated). Recorded by `batch_infer.py` for 72,829 clips; for the other 47,197 it was backfilled: verified against a rerun with fixed intrinsics for 7,612 of them (identical poses = fixed intrinsics were used; evidence per clip in `_pipeline/fixed_intrinsics_evidence.csv`) and otherwise inferred from the session zip (`true` iff it contains `undistort_maps.npz`, which agrees with 99.2% of the recorded values). A race in the undistortion cache (two clips of one session extracted at the same moment shared a temp file; the second silently fell back to self-calibration; fixed in `b722ac4`) means roughly 0.4-0.8% of the inferred `true` values (about 160-320 of 39,585 rows) may in fact be self-calibrated; the effect on the fused trajectories is small (median 5.6 m on ~485 m paths). |
-| `gps_fusion` | `status`, `error`, `region_used`, `used_fallback`, `network_profile_used`, `matched_keyframes`, `total_keyframes`, `map_match_error_mean_m`, `map_match_error_max_m`, `map_match_error_n_points`; the last eight are null unless the fusion produced a placement |
-| `qc` | `route`, `slam_ok`, `slam_reason`, `n_keyframes`, `slam_valid_until_s`, `scale_ok`, `scale_reason`, `gps_extent_m`, `fused_over_gps_len`, `fused_max_window_mps`, `slam_max_step_ratio`, `version` (null where a metric does not apply, e.g. `slam_valid_until_s` unless SLAM broke) |
-| `metric_scale` | `source` (`gps_fusion` / `metric_depth` / null), `scale`, then source-specific: `scale_p25`, `scale_p75`, `scale_rel_iqr`, `n_frames_used`, `model`, `scale_transferred`, `transfer_residual` (depth scale); `gps_fusion_scale` / `depth_scale` (when both exist); `status` (`failed`, `scale_contradicted`, `not_attempted`), `reason`, `error` (no usable scale) |
-| `scale_check` | `depth_scale`, `ratio`, `verdict`, `confidence`, `n_frames_used`, `scale_rel_iqr`, `adjudication`; all null unless `qc.route == "needs_scale_check"` |
-| `pose_source`, `pose_source_reason` | which poses to use, and why (table above) |
-
-Things to know:
-
-- **`metric` poses are an estimate**, about +-10% in scale (checked against GPS on only 5 clips, within +-8%).
-  The manifest's `metric_scale` entry lets you filter: `n_frames_used` (clips with few frames are weak
-  evidence) and `scale_rel_iqr` (spread of the per-frame estimates; ~11% of clips are above 0.25).
-- **`gps_fusion.status == "ok"` does not guarantee a good scale** -- that is what the QC checks and the
-  cross-check are for. Of the 4,495 cross-checked clips, 50% were confirmed by the depth scale, 17-21% were
-  contradicted for the length-ratio triggers but only 4% for the map-matching trigger (102 of 2,843, all of
-  which were then overruled by the GPS track length); noisy depth estimates (about a quarter) are judged on their
-  interquartile range and only 32 clips remain unverifiable. Measured error rate of the
-  unflagged clips: see [QC validation](#qc-validation-how-good-is-the-qc).
-- **`none` / `slam_jump`:** `qc.slam_valid_until_s` is the time of the last keyframe before the
-  first jump, i.e. a clean prefix if you want to truncate (not validated).
-- **`ego_failed` clips can still carry a `metric_scale`/`metric_poses`** (the first sweep ignored
-  QC). Ignore them: `pose_source` already says `none`.
-- **Scale of a depth-scaled clip** was computed on a SLAM rerun. For clips where the rerun's
-  gauge differed from the stored run, the scale is transferred through a similarity alignment
-  (`metric_scale.scale_transferred`, residual <= 5% of path length in `transfer_residual`; these are clips the original run processed with self-calibration because of that race, see `fixed_intrinsics`); where
-  the reruns genuinely diverged there is no scale (`rerun_poses_mismatch`).
-- **Where the scale lives:** `metric_scale` is in the manifest for every clip. Clips that got a depth
-  scale also have it inside `result.npz` (`metric_scale`, `metric_poses`, `metric_scale_json`; load with
-  `load_result_npz`, fields `metric_scale`/`metric_poses`/`metric_scale_info`), alongside `fused_poses`
-  where those exist. For plain `fused` clips the scale is only in the manifest (fused/slam step-length ratio).
-- **`static` clips** have `slam_poses` from < 4 keyframes: treat the trajectory as stationary rather than
-  reading motion from it (`qc.gps_extent_m` is the raw GPS span).
-- 9 clips (all `slam_jump`) had a `result.npz` but no record from the original run, probably a crashed worker; they got a row
-  with `ok: false`, `stage: "backfilled"` and `metric_scale.status: "not_attempted"`. The manifest has exactly one row per
-  source video of the sample manifest (120,026).
+The full manifest schema and notes on using the fields: [docs/manifest-schema.md](docs/manifest-schema.md).
 
 ```python
 import json
@@ -223,54 +180,18 @@ for line in open(".../trajectories/manifest.jsonl"):
     r = json.loads(line)
     if r["pose_source"] == "fused":    ...   # result.npz["fused_poses"]
     elif r["pose_source"] == "metric": ...   # result.npz["metric_poses"], r["metric_scale"]["n_frames_used"], ...
-    # "none": skip
+    # "static" / "none": skip
 ```
-
-## QC validation (how good is the QC?)
-
-All numbers 2026-10-21, measured with two analysis scripts that were removed afterwards (last version: `git show 61e6655:scripts/qc_validation/qc_depth_spotcheck.py` and `.../qc_placement.py`; the raw clip lists, scores and figures were not kept, rerunning needs a GPU run, see "Reproduce"). The only independent reference
-for a clip's scale is the depth-based one (DA3METRIC-LARGE vs the SLAM point cloud), so every statement below
-is "the two estimates agree / clearly disagree" (ratio depth/GPS in 0.8-1.25 / outside 0.67-1.5), never ground
-truth. A disagreement does not say which estimate is wrong; in some clips it was the depth scale.
-
-- **The reference is usable.** On a random sample of 363 unflagged `use_fused` clips with a confident depth scale
-  the depth/GPS ratio has median 0.98 and a robust spread of 8.3% (these bands are about 2 and 4 sigma).
-- **Unflagged clips (105,063).** 6 of 363 (1.7%, 95% CI 0.8-3.6%) clearly disagree, i.e. at most ~1,700 clips
-  (800-3,700) may have a wrong scale that QC cannot see; another 3.3% are ambiguous (0.67-0.8 / 1.25-1.5).
-  9% of the sample had no confident depth scale and is not covered.
-- **QC mostly errs by passing, not rejecting.** Among clips QC rejected for the scale check, 74 of 248 with a
-  confident depth scale (30%, CI 24-36%) have a depth scale that agrees with the GPS one: probable false
-  positives (~70-100 clips), against up to ~1,700 clips passed that disagree.
-- **Where the cross-check tier pays off** (clearly contradicted): fused/GPS length ratio 1.5-2 (now a hard
-  reject): 17 of 40; ratio < 0.8: 21% (184 of 881); no ratio computable: 17% (102 of 583); ratio 1.25-1.5: 18%
-  (33 of 188); mean map-match error > 10 m: 4% (102 of 2,843; flat across 10-15 / 15-25 / > 25 m; an earlier
-  spot check suggested 37% but was confounded by the other edge-case clips). Speed 30-50 m/s and SLAM step
-  ratio 25-50 (near-threshold) were fine (0 of 40, 1 of 30).
-- **Placement is fine; timing is not always.** The distance from raw GPS fixes to the fused path (cross-track,
-  insensitive to timing) has median 3.1 m per clip; only 10 of 1,496 QC-passed clips exceed 20 m and 2 exceed
-  50 m. The fused path at the *same time* as a fix is > 50 m off in 42 clips, but those lie 5 m from the path:
-  an implied GPS-vs-video time offset of a median 3 s (p90 9 s) in ~3% of clips. Not a pose error, but beware
-  when using GPS timestamps.
-- **Limits:** one sample, one pool, depth scale +-8-10%; the rates above were measured on confident depth
-  estimates only (9% of the sample had noisy ones and are not covered); `static` and `too_few_keyframes` clips were checked against GPS extent only, not against depth.
-
-Reproduce: draw a stratified sample of clips into a `clip_list.txt` (dataset-relative `.mp4` path, TAB, stratum label; the strata and
-sample sizes are in the spot-check script in git history, see above), score it with
-`scripts/estimate_metric_scale.py --clip_list ... --pipeline_dir <records dir> --work_dir <work dir>` (about 25 clips/min on a 4-GPU node),
-then compare each clip's depth scale with its GPS-fused scale (the spot-check script does this; its placement companion needs no GPU).
 
 ### Traceability
 
 - Each manifest row's `qc.version` and `trajectories/qc_config.json` (QC version, git commit, every threshold,
-  route and `pose_source` counts, depth-scale settings) say which QC produced it; `clip_qc.csv.config.json` is
-  the same for the QC step alone.
-- `_pipeline/integration_log.jsonl` records, per session zip, which clips got `metric_scale`, which
-  were transferred from a SLAM rerun, and which were refused; `_pipeline/manifest_metric_scale.jsonl` the depth step.
+  counts, depth-scale settings) say which QC produced it.
+- `_pipeline/integration_log.jsonl` records, per session zip, which clips got `metric_scale`, which were transferred
+  from a SLAM rerun, and which were refused; `_pipeline/manifest_metric_scale.jsonl` the depth step.
 - Files replaced in place are copied to `_pipeline/backups/` first (see its README.txt); the manifest scripts keep a
   timestamped `manifest.jsonl.bak_<time>` next to the manifest, which you can move there or delete.
-- The per-clip depth-scale files (rerun poses and per-frame scales) are transient work files in `$SCRATCH` (see
-  "Where everything lives"); the estimator skips finished clips via the QC csv and `integration_log.jsonl`, so deleting
-  them changes no behaviour.
+- The per-clip depth-scale files are transient work files in `$SCRATCH`; deleting them changes no behaviour.
 
 ## Loading a clip's trajectory
 

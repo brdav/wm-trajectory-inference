@@ -220,7 +220,7 @@ def adjudicate(chk, q):
     return None
 
 
-# ---- row schema (README, "manifest.jsonl row schema"): every key below is ALWAYS present, null when it does not
+# ---- row schema (docs/manifest-schema.md): every key below is ALWAYS present, null when it does not
 # apply, so a reader never needs `if key in row`. Unknown extra keys are kept after the known ones.
 TOP_KEYS = ("clip_id", "ok", "seconds", "fixed_intrinsics", "stage", "error", "gps_fusion", "qc", "metric_scale",
             "scale_check", "pose_source", "pose_source_reason")
@@ -426,7 +426,7 @@ def main():
                    pose_source_counts=dict(Counter(r["pose_source"] for r in rows if "pose_source" in r)),
                    metric_scale_source_counts=dict(summary),
                    manifest_script_git_commit=git("rev-parse", "HEAD"),
-                   notes="see README.md, section 'Which poses to use (downstream)'")
+                   notes="see README.md, section 'Which poses to use (downstream)', and docs/manifest-schema.md")
         with open(out_path.with_name("qc_config.json"), "w") as f:
             json.dump(cfg, f, indent=2)
         print(f"wrote {out_path.with_name('qc_config.json')}")

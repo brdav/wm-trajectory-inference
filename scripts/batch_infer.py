@@ -15,7 +15,7 @@ once inside an allocation that already has the vggtslam_image container attached
     # manifest, dataset root and output root default to the natix locations, see vggt_slam/sample_manifest.py):
     srun --environment=vggtslam_env python scripts/batch_infer.py --num_gpus 4
 
-Architecture (see conversation / README for the "why"):
+Architecture:
   - One persistent GPU worker process per GPU (--num_gpus x --workers_per_gpu), each loading
     the geometry model ONCE and then looping over many clips pulled from a shared queue --
     this avoids the model-reload cost that a fresh `python main.py` per clip would pay on every
