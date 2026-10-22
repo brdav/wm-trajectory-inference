@@ -89,6 +89,13 @@ set `TORCH_HOME` to `/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home`, w
 so it can be purged, and `~/.cache/torch/hub` does not have them. The depth models (DA3) download into `HF_HOME`
 (`/iopsstor/scratch/cscs/dbrggema/hf_home`) on first use.
 
+## Tests
+
+CPU-only tests of the QC routing and manifest logic (synthetic data, a few seconds):
+`python -m pytest tests` (the `wm_env` conda env is enough; `test_result_npz.py` is skipped unless torchvision is
+installed, i.e. inside the container). Refactors that touch the SLAM / GPS-fusion path need a GPU run instead: process
+a few clips before and after and diff them with `python tests/compare_results.py <old_out> <new_out>`.
+
 ## Rebuild image (Podman + Enroot)
 
 A `Dockerfile` is provided for GPU clusters using Slurm with Pyxis/enroot, for when you need to
