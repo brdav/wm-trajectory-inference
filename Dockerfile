@@ -97,6 +97,8 @@ ENV TORCH_CUDA_ARCH_LIST="9.0+PTX"
 # cmake/make/g++/python3-dev/python-is-python3 - build deps for map-matching-2 below (its own
 # CMake fetches and builds every other dependency -- Boost, zlib, libosmium, etc. -- from source,
 # so nothing else is needed at the apt level).
+# osmium-tool - the `osmium` CLI (extract / tags-filter), used by scripts/osm_maps/osm_bev.py's `prepare` to pre-filter
+# country PBFs; conda-forge has no aarch64 build of it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         wget \
@@ -108,6 +110,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxext6 \
         libxrender1 \
         cmake make g++ python3-dev python-is-python3 \
+        osmium-tool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=open3d-builder /opt/open3d-src/build/lib/python_package/pip_package/open3d-*.whl /tmp/
