@@ -38,6 +38,7 @@ from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_DIR))
+from vggt_slam.map_match import ensure_osmium  # noqa: E402
 
 BASE = "https://download.geofabrik.de"
 
@@ -202,6 +203,8 @@ def main():
 
     if args.skip_index:
         return
+    if not ensure_osmium():
+        sys.exit("osmium is required to build the spatial index (or pass --skip_index)")
 
     done = 0
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.index_workers) as pool:

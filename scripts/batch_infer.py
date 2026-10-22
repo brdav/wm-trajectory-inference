@@ -93,6 +93,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 os.environ.setdefault("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=4000000")
 
 sys.path.insert(0, str(REPO_DIR))
+from vggt_slam.map_match import ensure_osmium
 from vggt_slam.paths import DATASET_ROOT, SAMPLE_MANIFEST, TRAJ_ROOT
 from vggt_slam.pipeline_params import SlamParams
 from vggt_slam.regions import region_candidates
@@ -524,6 +525,11 @@ def main():
     if args.video and not args.out_dir:
         parser.error("--video requires --out_dir")
     # without --video this is batch mode over --sample_manifest (dataset root / out root default to the natix locations)
+
+    if args.gps_fusion:
+        # GPS fusion's road-network crop needs osmium; a failed install only loses fusion for the clips
+        # (each degrades gracefully), it must not abort a long batch
+        ensure_osmium()
 
     osm_extracts_dir = args.osm_extracts_dir
     if osm_extracts_dir is None and not args.video:

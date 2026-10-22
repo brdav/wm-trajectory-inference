@@ -20,6 +20,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -130,6 +131,25 @@ def _build_spatial_index(region_pbf_path, index_path):
     con.commit()
     con.close()
     os.replace(tmp_path, index_path)
+
+
+
+def ensure_osmium():
+    """True if `import osmium` works, pip-installing it first if needed. The cluster image was built before
+    the Dockerfile baked osmium in, so a run installs it on first use (needs network); installs persist for
+    the rest of the job, including spawned worker processes."""
+    try:
+        import osmium  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                        "--index-url", "https://pypi.org/simple", "--no-deps", "osmium"], check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] pip install osmium failed ({e})", file=sys.stderr, flush=True)
+        return False
 
 
 def _extract_local_bbox(region_pbf_path, south, west, north, east, osm_path):
