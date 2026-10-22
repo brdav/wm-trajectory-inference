@@ -27,7 +27,9 @@ gracefully — with no sibling `FIXED_METADATA.json`, `batch_infer.py` automatic
 skipped. Which videos to process comes from a sample manifest (below), so for another dataset provide a
 parquet with a `source_video_path` column (paths relative to `--dataset_root`, laid out as
 `<Country>/.../<session>/<HH-MM-SS>/FRONT_FOLDER/<video>.mp4`) and pass `--dataset_root`, `--out_root` and
-`--sample_manifest` (or the `DATASET_ROOT` / `OUT_ROOT` / `SAMPLE_MANIFEST` environment variables of the sbatch).
+`--sample_manifest` (or the `DATASET_ROOT` / `TRAJ_ROOT` / `SAMPLE_MANIFEST` environment variables of the sbatch).
+The cluster paths live in one place, `vggt_slam/paths.py`, overridable by those same environment variables
+(`REPO_DIR`, `CPU_PY`, `TORCH_HOME` and `HF_HOME` can likewise be overridden for the sbatch files).
 
 ## Repository layout
 
@@ -78,8 +80,8 @@ no path cache exists. Read via `vggt_slam/sample_manifest.py`.
 
 Logs of both jobs: `trajectories/_pipeline/logs/`. To try the pipeline on a handful of clips without touching
 the real output, give the first job a small manifest and a scratch output folder:
-`sbatch --export=ALL,OUT_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch`
-(link `_osm_extracts` into `$OUT_ROOT` for GPS fusion).
+`sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch`
+(link `_osm_extracts` into `$TRAJ_ROOT` for GPS fusion).
 
 **Model weights.** The SLAM loop closure needs `dino_salad.ckpt` and the DINOv2 `torch.hub` repo in a torch hub
 cache: `$TORCH_HOME/hub/checkpoints/dino_salad.ckpt` (download from

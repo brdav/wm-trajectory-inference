@@ -51,10 +51,9 @@ os.environ.setdefault("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=4000000"
 sys.path.insert(0, str(REPO_DIR))
 sys.path.insert(0, str(REPO_DIR / "scripts"))
 
-DEFAULT_TRAJ_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"
-DEFAULT_PIPELINE_DIR = f"{DEFAULT_TRAJ_ROOT}/_pipeline"  # durable records: qc csv, depth-step manifest, integration log
+from vggt_slam.paths import DATASET_ROOT, PIPELINE_DIR, TRAJ_ROOT  # noqa: E402
+
 DEFAULT_WORK_DIR = os.path.join(os.environ.get("SCRATCH", "/tmp"), "natix_metric_scale_work")  # transient per-clip files
-DEFAULT_DATASET_ROOT = "/capstor/store/cscs/swissai/ab036/datasets/natix"
 MANIFEST_NAME = "manifest_metric_scale.jsonl"
 MIN_FRAMES_USED = 1
 MAX_METRIC_DEPTH_M = 80.0
@@ -314,7 +313,7 @@ def worker(gpu_id, cfg, job_q, res_q):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--pipeline_dir", default=DEFAULT_PIPELINE_DIR,
+    ap.add_argument("--pipeline_dir", default=PIPELINE_DIR,
                     help="Durable records: manifest_metric_scale.jsonl (written), integration_log.jsonl (read), clip_qc.csv")
     ap.add_argument("--work_dir", default=DEFAULT_WORK_DIR,
                     help="Transient per-clip metric_scale.npz files (rerun poses, per-frame scales) that integrate_metric_scale.py "
@@ -326,8 +325,8 @@ def main():
     ap.add_argument("--qc_csv", default=None,
                     help="scripts/clip_qc.py output: process the clips it routed to needs_metric_scale "
                          "(recommended). Default: every clip whose gps_fusion status in --manifest is not 'ok'")
-    ap.add_argument("--manifest", default=f"{DEFAULT_TRAJ_ROOT}/manifest.jsonl")
-    ap.add_argument("--dataset_root", default=DEFAULT_DATASET_ROOT)
+    ap.add_argument("--manifest", default=f"{TRAJ_ROOT}/manifest.jsonl")
+    ap.add_argument("--dataset_root", default=DATASET_ROOT)
     ap.add_argument("--statuses", nargs="*", default=None,
                     help="Only clips with these labels: gps_fusion statuses without --qc_csv, "
                          "clip_qc scale_reason values (e.g. no_fused_poses) with it")

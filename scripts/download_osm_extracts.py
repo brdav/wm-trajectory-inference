@@ -68,7 +68,7 @@ OTHER_REGIONS = {
     "Japan": "asia/japan",
     # Not a natix dataset country folder -- a fallback-only region for clips mislabeled as
     # Austria (confirmed: GPS fixes ~300km south of Austria, in Bosnia and Herzegovina). See
-    # scripts/batch_infer.py's FALLBACK_REGIONS.
+    # vggt_slam/regions.py's FALLBACK_REGIONS.
     "Bosnia and Herzegovina": "europe/bosnia-herzegovina",
 }
 
@@ -80,7 +80,7 @@ OTHER_REGIONS = {
 # vggt_slam/us_regions.py's docstring), so a clip's *true* location can land in a state that has
 # no folder of its own in the dataset at all (e.g. a clip filed under "Rhode Island" but actually
 # in New Hampshire, which otherwise wouldn't have an extract downloaded here). GPS-centroid-based
-# region selection (scripts/batch_infer.py's `_region_candidates`) needs the full set to have
+# region selection (vggt_slam/regions.py's `region_candidates`) needs the full set to have
 # anywhere to actually resolve a mislabeled clip to.
 US_STATE_SLUGS = {
     "Alabama": "alabama", "Alaska": "alaska", "Arizona": "arizona", "Arkansas": "arkansas",

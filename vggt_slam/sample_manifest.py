@@ -1,6 +1,6 @@
 """Reader for the dataset's sample manifest -- the list of clips the pipeline should process.
 
-The manifest (parquet, one row per 5 s sample/chunk) lives at DEFAULT_SAMPLE_MANIFEST. Its
+The manifest (parquet, one row per 5 s sample/chunk) lives at vggt_slam.paths.SAMPLE_MANIFEST. Its
 `source_video_path` column names the full source video each sample was cut from, as a path relative to
 the dataset root (Country/.../<session>/<HH-MM-SS>/FRONT_FOLDER/FRONT_<timestamp>.mp4). The pipeline
 processes whole source videos, so the work list is the set of unique source videos in the manifest,
@@ -14,13 +14,12 @@ scripts/run_full_dataset.sbatch.
 """
 from pathlib import Path
 
-DEFAULT_DATASET_ROOT = "/capstor/store/cscs/swissai/ab036/datasets/natix"
-DEFAULT_TRAJECTORY_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"  # where all output goes
-DEFAULT_SAMPLE_MANIFEST = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/manifest/samples_24fps.parquet"
+from vggt_slam.paths import SAMPLE_MANIFEST
+
 VIDEO_COLUMN = "source_video_path"
 
 
-def source_videos(manifest_path=DEFAULT_SAMPLE_MANIFEST, countries=None):
+def source_videos(manifest_path=SAMPLE_MANIFEST, countries=None):
     """Unique source videos of the manifest as dataset-relative path strings, in order of first
     appearance. manifest_path: a parquet file, or a hive-partitioned parquet directory
     (.../samples_24fps/country=<name>/part.parquet); both hold the same rows.

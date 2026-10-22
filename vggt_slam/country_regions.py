@@ -1,7 +1,7 @@
 """Approximate geographic centroids of every non-US country/region this dataset spans (see
 scripts/download_osm_extracts.py's EUROPE_COUNTRIES/OTHER_REGIONS), used to order OSM-region
-candidates by proximity to a clip's own GPS fixes -- see scripts/batch_infer.py's
-`_region_candidates`. Mirrors vggt_slam/us_regions.py's approach and rationale for US states,
+candidates by proximity to a clip's own GPS fixes -- see vggt_slam/regions.py's
+`region_candidates`. Mirrors vggt_slam/us_regions.py's approach and rationale for US states,
 generalized to countries once the same folder-mislabeling pattern was confirmed dataset-wide, not
 just within the US: e.g. real clips filed under "Austria" whose GPS is actually in Germany,
 "Croatia" actually in Germany (near Munich), "Switzerland" actually in central Italy (~700km from

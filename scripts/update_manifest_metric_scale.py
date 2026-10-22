@@ -69,9 +69,12 @@ from pathlib import Path
 
 import numpy as np
 
-TRAJ_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"
-DATASET_ROOT = "/capstor/store/cscs/swissai/ab036/datasets/natix/"
-PIPELINE_DIR = f"{TRAJ_ROOT}/_pipeline"  # durable records of the pipeline (qc csv, depth-step manifest, integration log, logs, backups)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root (vggt_slam package)
+from vggt_slam import paths  # noqa: E402
+
+TRAJ_ROOT = paths.TRAJ_ROOT
+DATASET_ROOT = paths.DATASET_ROOT.rstrip("/") + "/"  # clip_ids are DATASET_ROOT + the dataset-relative path
+PIPELINE_DIR = paths.PIPELINE_DIR
 METRIC_MANIFEST = f"{PIPELINE_DIR}/manifest_metric_scale.jsonl"
 INTEGRATION_LOG = f"{PIPELINE_DIR}/integration_log.jsonl"
 FUSED_STATUSES = {"ok", "no_route_match"}

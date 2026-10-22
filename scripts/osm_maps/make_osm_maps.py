@@ -58,9 +58,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "scripts" / "osm_maps"))  # osm_bev
 
-DATASET_ROOT = "/capstor/store/cscs/swissai/ab036/datasets/natix"
-TRAJ_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"
-SAMPLES_PARQUET = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/manifest/samples_24fps.parquet"
+from vggt_slam.paths import DATASET_ROOT, SAMPLE_MANIFEST as SAMPLES_PARQUET, TRAJ_ROOT  # noqa: E402
 TICKS_PER_S = 10                      # path samples per second; one marker dot per second
 
 

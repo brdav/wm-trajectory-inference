@@ -27,7 +27,7 @@
 # Why self-resubmit at all: the full ~120k-clip dataset takes about 90 hours (memory/performance-investigations.md),
 # far longer than the "normal" partition's 12h limit, so one job can only make partial progress.
 # batch_infer.py is explicitly designed for this: it skips every manifest video that is already
-# processed (a loose result.npz, an ok row in $OUT_ROOT/manifest.jsonl, or its result inside the session's zip --
+# processed (a loose result.npz, an ok row in $TRAJ_ROOT/manifest.jsonl, or its result inside the session's zip --
 # see discover_clips's docstring), so simply resubmitting picks up exactly where the last job left off. This script automates that: it
 # resubmits itself unless batch_infer.py exited 0, which only happens when discover_clips found
 # nothing left to process (i.e. the dataset is actually done) -- any other exit (walltime hit,
@@ -47,23 +47,23 @@
 # merged into that session's zip by the packing step. Afterwards run scripts/run_metric_scale.sbatch
 # (QC, depth-based scale for clips without a trusted GPS scale, manifest fields).
 #
-# Everything is written under $OUT_ROOT (the trajectories folder): per-clip results (session zips after the
-# packing step), manifest.jsonl, and job logs / STOP file / resubmit counter in $OUT_ROOT/_pipeline/.
-# OUT_ROOT, DATASET_ROOT and SAMPLE_MANIFEST can be overridden from the environment, e.g. to test on a few
-# clips: sbatch --export=ALL,OUT_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch
+# Everything is written under $TRAJ_ROOT (the trajectories folder): per-clip results (session zips after the
+# packing step), manifest.jsonl, and job logs / STOP file / resubmit counter in $TRAJ_ROOT/_pipeline/.
+# TRAJ_ROOT, DATASET_ROOT and SAMPLE_MANIFEST can be overridden from the environment, e.g. to test on a few
+# clips: sbatch --export=ALL,TRAJ_ROOT=$SCRATCH/test_out,SAMPLE_MANIFEST=$SCRATCH/small.parquet scripts/run_full_dataset.sbatch
 
 set -uo pipefail
 
-OUT_ROOT="${OUT_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories}"
+TRAJ_ROOT="${TRAJ_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories}"
 DATASET_ROOT="${DATASET_ROOT:-/capstor/store/cscs/swissai/ab036/datasets/natix}"
 SAMPLE_MANIFEST="${SAMPLE_MANIFEST:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/manifest/samples_24fps.parquet}"
-PIPELINE_DIR="$OUT_ROOT/_pipeline"
+PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
 
 # The SLAM loop-closure model (SALAD) needs dino_salad.ckpt and the DINOv2 torch.hub repo in a torch hub cache
 # (README, "Model weights"); the depth model weights are downloaded into HF_HOME on first use.
 export TORCH_HOME="${TORCH_HOME:-/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home}"
 export HF_HOME="${HF_HOME:-/iopsstor/scratch/cscs/dbrggema/hf_home}"
-REPO_DIR=/users/dbrggema/wm_trajectory_inference
+REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
 STOP_FILE="$PIPELINE_DIR/STOP"
 RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
 MAX_RESUBMITS=40  # generous headroom over the ~8 links a 90h run at 12h/job would need -- a
@@ -105,7 +105,7 @@ echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME ==="
 
 srun --environment=vggtslam_env python3 -u "$REPO_DIR/scripts/batch_infer.py" \
     --dataset_root "$DATASET_ROOT" \
-    --out_root "$OUT_ROOT" \
+    --out_root "$TRAJ_ROOT" \
     --sample_manifest "$SAMPLE_MANIFEST" \
     --fps 10 \
     --num_gpus 4 \
@@ -124,7 +124,7 @@ if [ "$EXIT_CODE" -eq 0 ]; then
     echo "=== $(date -Iseconds) packing sessions into zips"
     srun --environment=vggtslam_env python3 -u "$REPO_DIR/scripts/pack_sessions.py" \
         --dataset_root "$DATASET_ROOT" \
-        --out_root "$OUT_ROOT" \
+        --out_root "$TRAJ_ROOT" \
         --sample_manifest "$SAMPLE_MANIFEST" \
         --min_age_days 0 || { echo "pack_sessions.py failed -- output is intact but not packed; rerun it by hand" >&2; exit 1; }
     echo "=== $(date -Iseconds) done. Next: sbatch scripts/run_metric_scale.sbatch"

@@ -330,7 +330,7 @@ def align_trajectory_to_roads(rotations, translations, frame_ids, extraction_fps
     genuinely have no nearby roads even though the GPS/trajectory themselves are fine. Each
     candidate is tried until one yields a non-empty crop (Geofabrik's per-country extracts can
     leave gaps right at a border, so the "obviously correct" neighboring country isn't always the
-    one that actually has the nearby ways -- see scripts/batch_infer.py's FALLBACK_REGIONS).
+    one that actually has the nearby ways -- see vggt_slam/regions.py's FALLBACK_REGIONS).
     None/empty disables this (no fallback attempted).
 
     icp_max_iters: cap on _icp_rigid_to_line's own inner correspondence-refitting loop (steps 2-3

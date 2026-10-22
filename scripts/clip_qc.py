@@ -59,9 +59,10 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from vggt_slam import gps as gps_module
+from vggt_slam import paths
 
-TRAJ_ROOT = Path("/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories")
-DATASET_ROOT = Path("/capstor/store/cscs/swissai/ab036/datasets/natix")
+TRAJ_ROOT = Path(paths.TRAJ_ROOT)
+DATASET_ROOT = Path(paths.DATASET_ROOT)
 
 QC_VERSION = "2026-10-21.1"  # bump whenever a threshold or routing rule below changes
 # Evidence behind each threshold: memory/qc-thresholds-rationale.md

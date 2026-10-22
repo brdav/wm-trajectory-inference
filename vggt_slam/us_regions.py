@@ -1,5 +1,5 @@
 """Approximate geographic centroids of US states/DC, used to order OSM-region candidates by
-proximity to a clip's own GPS fixes -- see scripts/batch_infer.py's `_region_candidates`.
+proximity to a clip's own GPS fixes -- see vggt_slam/regions.py's `region_candidates`.
 
 Motivation: natix dataset clips are sometimes filed under the wrong state folder (confirmed on
 several real clips: e.g. a clip under "Virginia" whose GPS fixes are actually in San Diego,

@@ -53,20 +53,20 @@ set -uo pipefail
 TRAJ_ROOT="${TRAJ_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories}"  # override to run on another output folder
 PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
 WORK_DIR="${WORK_DIR:-${SCRATCH:-/tmp}/natix_metric_scale_work}"
-REPO_DIR=/users/dbrggema/wm_trajectory_inference
+REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
 SELF="$REPO_DIR/scripts/run_metric_scale.sbatch"
 STOP_FILE="$PIPELINE_DIR/STOP"
 RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
 MAX_RESUBMITS=20
 QC_CSV="$PIPELINE_DIR/clip_qc.csv"
-CPU_PY=/users/dbrggema/miniconda3/envs/wm_env/bin/python  # CPU-only steps (clip_qc, zip integration, manifest)
+CPU_PY="${CPU_PY:-/users/dbrggema/miniconda3/envs/wm_env/bin/python}"  # CPU-only steps (clip_qc, zip integration, manifest)
 EXTRA_ARGS="${EXTRA_ARGS:-}"  # override: sbatch --export=ALL,EXTRA_ARGS=--retry_failed scripts/run_metric_scale.sbatch
 
 # Torch hub cache with dino_salad.ckpt + the DINOv2 hub repo (the SLAM loop-closure model needs
 # both; ~/.cache/torch/hub currently lacks them) and the HF cache holding DA3METRIC-LARGE (it is
 # downloaded there on first use if missing and the node has internet).
-export TORCH_HOME=/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home
-export HF_HOME=/iopsstor/scratch/cscs/dbrggema/hf_home
+export TORCH_HOME="${TORCH_HOME:-/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home}"
+export HF_HOME="${HF_HOME:-/iopsstor/scratch/cscs/dbrggema/hf_home}"
 
 mkdir -p "$PIPELINE_DIR/logs" "$WORK_DIR"
 

@@ -50,8 +50,9 @@ from pathlib import Path
 
 import numpy as np
 
-DEFAULT_TRAJ_ROOT = "/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories"
-DEFAULT_PIPELINE_DIR = f"{DEFAULT_TRAJ_ROOT}/_pipeline"  # integration_log.jsonl goes here
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root (vggt_slam package)
+from vggt_slam.paths import PIPELINE_DIR, TRAJ_ROOT  # noqa: E402
+
 DEFAULT_WORK_DIR = os.path.join(os.environ.get("SCRATCH", "/tmp"), "natix_metric_scale_work")  # per-clip files from estimate_metric_scale.py
 NEW_KEYS = ("metric_scale", "metric_poses", "metric_scale_json")
 # Fallbacks for stats not stored in metric_scale.npz by the first sweep (its fixed settings).
@@ -226,9 +227,9 @@ def process_session(session, clips, traj_root, dry_run, force):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work_dir", default=DEFAULT_WORK_DIR, help="Per-clip metric_scale.npz files made by estimate_metric_scale.py")
-    ap.add_argument("--traj_root", default=DEFAULT_TRAJ_ROOT)
+    ap.add_argument("--traj_root", default=TRAJ_ROOT)
     ap.add_argument("--countries", nargs="*", default=None)
-    ap.add_argument("--pipeline_dir", default=DEFAULT_PIPELINE_DIR, help="Where integration_log*.jsonl goes")
+    ap.add_argument("--pipeline_dir", default=PIPELINE_DIR, help="Where integration_log*.jsonl goes")
     ap.add_argument("--limit_sessions", type=int, default=None)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--dry_run", action="store_true")

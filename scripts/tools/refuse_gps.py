@@ -59,7 +59,6 @@ from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parents[2]  # scripts/tools/ -> repo root
 sys.path.insert(0, str(REPO_DIR))
-sys.path.insert(0, str(REPO_DIR / "scripts"))  # batch_infer
 
 
 def discover_refusion_candidates(dataset_root, out_root, countries=None, limit=None, clip_ids=None):
@@ -115,7 +114,7 @@ def refuse_one(clip):
     is captured into the record's own gps_fusion.status, same as batch_infer.py's per-clip
     try/except)."""
     import numpy as np
-    from batch_infer import _region_name, _region_candidates
+    from vggt_slam.regions import folder_region, region_candidates
     from vggt_slam import gps as gps_module
     from vggt_slam.gps_fusion import align_trajectory_to_roads
     from vggt_slam.map_match import trim_osm_network_cache
@@ -157,9 +156,9 @@ def refuse_one(clip):
         extraction_fps = loaded["extraction_fps"]
 
         gps = gps_module.load_gps_fixes(str(gps_csv))
-        region_pbf_path, fallback_paths = _region_candidates(rel, video_path, osm_extracts_dir)
+        region_pbf_path, fallback_paths = region_candidates(rel, video_path, osm_extracts_dir)
         if not region_pbf_path:
-            raise ValueError(f"no region extract for {_region_name(rel)} under {osm_extracts_dir}")
+            raise ValueError(f"no region extract for {folder_region(rel)} under {osm_extracts_dir}")
 
         (fused_rot, fused_trans, scale, matches, matched_line, snapped, region_used,
          network_profile) = align_trajectory_to_roads(

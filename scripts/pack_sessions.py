@@ -51,8 +51,8 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (vggt_slam package)
-from vggt_slam.sample_manifest import (DEFAULT_DATASET_ROOT, DEFAULT_SAMPLE_MANIFEST,  # noqa: E402
-                                       DEFAULT_TRAJECTORY_ROOT, source_videos)
+from vggt_slam.paths import DATASET_ROOT, SAMPLE_MANIFEST, TRAJ_ROOT  # noqa: E402
+from vggt_slam.sample_manifest import source_videos  # noqa: E402
 
 
 def _iter_sessions(dataset_root, out_root, countries, sample_manifest):
@@ -138,9 +138,9 @@ def _pack_one(session_dir):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dataset_root", default=DEFAULT_DATASET_ROOT, help="Source dataset root that the sample manifest's relative video paths are resolved against")
-    p.add_argument("--out_root", default=DEFAULT_TRAJECTORY_ROOT, help="Trajectories output root (batch_infer.py's --out_root)")
-    p.add_argument("--sample_manifest", default=DEFAULT_SAMPLE_MANIFEST, help="Sample manifest (parquet) listing the source videos, i.e. which clips each session should contain")
+    p.add_argument("--dataset_root", default=DATASET_ROOT, help="Source dataset root that the sample manifest's relative video paths are resolved against")
+    p.add_argument("--out_root", default=TRAJ_ROOT, help="Trajectories output root (batch_infer.py's --out_root)")
+    p.add_argument("--sample_manifest", default=SAMPLE_MANIFEST, help="Sample manifest (parquet) listing the source videos, i.e. which clips each session should contain")
     p.add_argument("--countries", nargs="+", default=None, help="Restrict to these country subdirs (default: all)")
     p.add_argument("--min_age_days", type=float, default=7.0,
                    help="Skip a session if anything under it was modified more recently than this many days ago (default: 7)")
