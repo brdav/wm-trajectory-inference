@@ -223,8 +223,8 @@ def _result_in_session_zip(out_dir):
     return str(out_dir.relative_to(session_cache_dir(out_dir)) / "result.npz") in names
 
 
-def discover_clips(dataset_root, out_root, scratch_dir, countries, limit, force=False, osm_extracts_dir=None,
-                   sample_manifest=SAMPLE_MANIFEST):
+def clips_to_process(dataset_root, out_root, scratch_dir, countries, limit, force=False, osm_extracts_dir=None,
+                      sample_manifest=SAMPLE_MANIFEST):
     """Streams clip dicts for every source video in the sample manifest that is not processed yet (a
     generator, so extraction can start on the first clip right away). A clip is already processed if it has
     a loose out_dir/result.npz, an ok row in <out_root>/manifest.jsonl, or its result.npz inside its
@@ -236,7 +236,7 @@ def discover_clips(dataset_root, out_root, scratch_dir, countries, limit, force=
     dataset_root, out_root = Path(dataset_root), Path(out_root)
     videos = source_videos(sample_manifest, countries)
     done = set() if force else _processed_clip_ids(out_root)
-    print(f"discover_clips: {len(videos)} source videos in {sample_manifest}"
+    print(f"clips_to_process: {len(videos)} source videos in {sample_manifest}"
           f"{' (countries: ' + ', '.join(countries) + ')' if countries else ''}; "
           f"{len(done)} clips have an ok row in {out_root / 'manifest.jsonl'}", flush=True)
     n_done = n_zip_only = n_new = n_into_packed = 0
@@ -266,7 +266,7 @@ def discover_clips(dataset_root, out_root, scratch_dir, countries, limit, force=
         n_new += 1
         if limit and n_new >= limit:
             return
-    print(f"discover_clips: {n_done} already processed ({n_zip_only} of them only found inside a session zip, "
+    print(f"clips_to_process: {n_done} already processed ({n_zip_only} of them only found inside a session zip, "
           f"without a manifest row), {n_new} to process ({n_into_packed} belong to an already-packed session)",
           flush=True)
 
@@ -388,7 +388,7 @@ def gpu_worker(gpu_id, run_cfg, job_queue, result_queue, keep_frames, gps_fusion
         # process itself is gone, not just the current Python call. Confirmed to happen in
         # practice: several clips ended up with a partial result.npz on disk (from the pipeline's
         # own SLAM-stage save) but no manifest.jsonl record at all, silently un-retriable forever
-        # after since discover_clips's skip-check only looks at result.npz existing. See
+        # after since clips_to_process's skip-check only looks at result.npz existing. See
         # _reap_dead_workers in main() for the other half of this.
         result_queue.put({"clip_id": clip_id, "gpu": gpu_id, "pid": pid, "status": "started",
                            "out_dir": str(out_dir)})
@@ -527,7 +527,7 @@ class BatchRun:
         self.run_cfg = run_cfg
         self.manifest_path = manifest_dir / "manifest.jsonl"
         self.done = 0
-        self.submitted = 0  # clips submitted for extraction so far -- keeps growing until discovery finishes
+        self.submitted = 0  # clips submitted for extraction so far -- keeps growing until the manifest list is exhausted
         self.fixed_count = self.shared_count = 0
         self.in_progress = {}  # worker pid -> {"clip_id", "out_dir"} of the job it is on, see _reap_dead_workers
         self.feeder_error = None
@@ -567,7 +567,7 @@ class BatchRun:
         # was in flight -- that clip's job never gets a completion message at all, and without
         # this it would just be silently dropped: no manifest.jsonl record, and whatever partial
         # result.npz the pipeline's own SLAM-stage save left behind on disk would make every future
-        # run's discover_clips skip-check treat it as already done, forever.
+        # run's clips_to_process skip-check treat it as already done, forever.
         for w in self.workers:
             if w.is_alive():
                 continue
@@ -582,7 +582,7 @@ class BatchRun:
             self._record({"clip_id": lost["clip_id"], "ok": False, "error": err})
             print(f"[{self.done}/{self.submitted}] FAIL (worker died) {lost['clip_id']}: {err}",
                   file=sys.stderr, flush=True)
-            # so a future run's discover_clips retries this clip instead of treating the crash's
+            # so a future run's clips_to_process retries this clip instead of treating the crash's
             # partial output as a completed run
             out_dir = Path(lost["out_dir"])
             if out_dir.exists():
@@ -619,10 +619,10 @@ class BatchRun:
         return clip
 
     def _feed(self, pool):
-        """Thread: submit each discovered clip for extraction, at most `extract_lookahead` ahead of the GPUs.
+        """Thread: submit each selected clip for extraction, at most `extract_lookahead` ahead of the GPUs.
         Must run concurrently with the main thread draining results: slots are only released by
         _drain_results, so submitting everything upfront would deadlock. Always ends with the None
-        sentinel, also when discovery fails (the error is re-raised by run())."""
+        sentinel, also when selecting clips fails (the error is re-raised by run())."""
         try:
             for c in self.clips:
                 self.extract_slot.acquire()
@@ -632,14 +632,14 @@ class BatchRun:
         except BaseException:
             self.feeder_error = traceback.format_exc()
         finally:
-            self.extract_done_q.put(None)  # sentinel: discovery + submission is fully done
+            self.extract_done_q.put(None)  # sentinel: selection + submission is fully done
 
     def _collect_extractions(self):
-        """Main thread: hand each extracted clip to the GPU workers until discovery is done and every
+        """Main thread: hand each extracted clip to the GPU workers until the clip list is exhausted and every
         submitted clip has come back."""
-        discovery_done = False
+        selection_done = False
         extract_completed = 0
-        while not (discovery_done and extract_completed >= self.submitted):
+        while not (selection_done and extract_completed >= self.submitted):
             # The timeout matters: a plain get() deadlocks once all lookahead slots are in flight and their GPU
             # results finish before the next extraction (which cannot start, the feeder waits for a slot) --
             # _drain_results, the only thing that frees a slot, would never be called. Periodic draining
@@ -650,8 +650,8 @@ class BatchRun:
                 self._drain_results(block=False)
                 continue
             if item is None:
-                discovery_done = True
-                print(f"{self.submitted} clips discovered total ({self.fixed_count} --fixed_intrinsics, "
+                selection_done = True
+                print(f"{self.submitted} clips selected from the manifest ({self.fixed_count} --fixed_intrinsics, "
                       f"{self.shared_count} --shared_intrinsics)", flush=True)
                 continue
             extract_completed += 1
@@ -703,8 +703,8 @@ class BatchRun:
         self.manifest_f.close()
         print(f"Done. {self.done}/{self.submitted} accounted for. See {self.manifest_path}")
         if self.feeder_error:
-            # clips discovered before the failure were processed; a non-zero exit also stops the self-resubmitting job
-            raise RuntimeError(f"clip discovery failed:\n{self.feeder_error}")
+            # clips selected before the failure were processed; a non-zero exit also stops the self-resubmitting job
+            raise RuntimeError(f"clip selection failed:\n{self.feeder_error}")
 
 
 def _single_clip(args):
@@ -740,7 +740,7 @@ def main():
     else:
         # batch mode over --sample_manifest; a generator, so extraction can start on the first clip immediately
         osm_extracts_dir = args.osm_extracts_dir or str(Path(args.out_root) / "_osm_extracts")
-        clips = discover_clips(args.dataset_root, args.out_root, args.scratch_dir, args.countries,
+        clips = clips_to_process(args.dataset_root, args.out_root, args.scratch_dir, args.countries,
                                args.limit, args.force, osm_extracts_dir, args.sample_manifest)
         manifest_dir = Path(args.out_root)
 

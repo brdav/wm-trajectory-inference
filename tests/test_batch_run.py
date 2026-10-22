@@ -1,4 +1,4 @@
-"""BatchRun's clip feeder (scripts/batch_infer.py): a failing clip discovery must end the feed, not hang the run."""
+"""BatchRun's clip feeder (scripts/batch_infer.py): a failing clip selection must end the feed, not hang the run."""
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +34,7 @@ def drain(q):
 def test_feeder_failure_still_sends_sentinel(monkeypatch):
     def clips():
         raise FileNotFoundError("sample manifest missing")
-        yield  # noqa: unreachable, makes this a generator like discover_clips
+        yield  # noqa: unreachable, makes this a generator like clips_to_process
 
     run = make_run(clips())
     run._feed(InlinePool())

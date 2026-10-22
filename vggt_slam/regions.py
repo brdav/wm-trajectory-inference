@@ -54,7 +54,7 @@ def read_latlon_centroid(csv_path):
     """Cheap best-effort mean (lat, lon) of a natix FRONT_*.csv's real (non-'na') GPS fixes, or
     None if the file is missing/unreadable or has no real fixes. Deliberately NOT
     vggt_slam.gps.load_gps_fixes -- that also does frame-number/fps alignment and a UTM
-    projection that this doesn't need, and discover_clips calls this for every not-yet-processed
+    projection that this doesn't need, and clips_to_process calls this for every not-yet-processed
     US clip on every run, so keeping it a minimal single-pass CSV scan matters.
     """
     try:
@@ -117,7 +117,7 @@ def all_region_candidates(video_path, osm_extracts_dir):
 
 
 def region_candidates(rel_path, video_path, osm_extracts_dir):
-    """Unified region-selection entry point used by both discover_clips (batch_infer.py) and
+    """Unified region-selection entry point used by both clips_to_process (batch_infer.py) and
     refuse_gps.py's --resume re-fusion path. Returns (primary_path_or_None, fallback_paths).
     """
     if not osm_extracts_dir:

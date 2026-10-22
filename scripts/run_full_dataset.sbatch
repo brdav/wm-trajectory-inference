@@ -28,8 +28,8 @@
 # far longer than the "normal" partition's 12h limit, so one job can only make partial progress.
 # batch_infer.py is explicitly designed for this: it skips every manifest video that is already
 # processed (a loose result.npz, an ok row in $TRAJ_ROOT/manifest.jsonl, or its result inside the session's zip --
-# see discover_clips's docstring), so simply resubmitting picks up exactly where the last job left off. This script automates that: it
-# resubmits itself unless batch_infer.py exited 0, which only happens when discover_clips found
+# see clips_to_process's docstring), so simply resubmitting picks up exactly where the last job left off. This script automates that: it
+# resubmits itself unless batch_infer.py exited 0, which only happens when clips_to_process found
 # nothing left to process (i.e. the dataset is actually done) -- any other exit (walltime hit,
 # a transient crash, ...) means there's still work left, so it retries rather than requiring
 # someone to notice and resubmit by hand.

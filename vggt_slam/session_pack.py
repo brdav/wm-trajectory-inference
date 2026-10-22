@@ -12,7 +12,7 @@ why (refuse_gps.py already re-touches old, already-"finished" clips, so packing 
 session will never need writing to again; it can only make that the exception, not something
 every reader has to handle transparently).
 
-Packing-awareness in the live pipeline: scripts/batch_infer.py's discover_clips treats a clip as done if
+Packing-awareness in the live pipeline: scripts/batch_infer.py's clips_to_process treats a clip as done if
 its result.npz is loose, has an ok row in manifest.jsonl, or is a member of the session zip
 (session_zip_path). A packed session is therefore NOT assumed complete: a clip added to it later is processed,
 and scripts/pack_sessions.py merges it into the existing zip.
