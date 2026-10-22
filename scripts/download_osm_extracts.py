@@ -32,7 +32,6 @@ returns (see that function -- kept in sync with REGION_SLUGS below).
 import argparse
 import concurrent.futures
 import os
-import subprocess
 import sys
 import urllib.request
 from pathlib import Path
