@@ -4,7 +4,7 @@
 Clips whose gps_fusion status in the trajectory manifest is not "ok" have no `fused_poses`, only
 `slam_poses`, which are in an arbitrary visual-gauge scale. For each such clip this script:
 
-  1. extracts frames and (like batch_infer.py) undistorts them with the trip's calibration,
+  1. extracts frames and (like scripts/slam/batch_infer.py) undistorts them with the trip's calibration,
   2. re-runs VGGT-SLAM with dense point-cloud logging (no GPS fusion) -- the point cloud is
      needed to get SLAM-gauge depth, and batch runs don't store it,
   3. runs DA3METRIC-LARGE on --n_frames evenly spaced keyframes and converts its output to
@@ -49,7 +49,6 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 os.environ.setdefault("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=4000000")
 
 sys.path.insert(0, str(REPO_DIR))
-sys.path.insert(0, str(REPO_DIR / "scripts"))
 
 from vggt_slam.paths import DATASET_ROOT, PIPELINE_DIR, TRAJ_ROOT  # noqa: E402
 
@@ -229,7 +228,7 @@ def worker(gpu_id, cfg, job_q, res_q):
     from depth_anything_3.api import DepthAnything3
     from vggt_slam import pipeline  # after torch, same order as batch_infer.gpu_worker
     from vggt_slam.pipeline_params import SlamParams
-    import batch_infer
+    from vggt_slam import clip_prep
     from vggt_slam.undistort import load_undistort_maps, undistort_frame
     torch.set_num_threads(cfg["cpu_threads"])
 
@@ -249,11 +248,11 @@ def worker(gpu_id, cfg, job_q, res_q):
             video = Path(job["video_path"])
             clip = {
                 "video_path": video, "out_dir": work_dir, "frames_dir": work_dir / "frames",
-                "camera_meta": batch_infer._resolve_camera_meta(video),
+                "camera_meta": clip_prep.resolve_camera_meta(video),
             }
             if clip["camera_meta"] is None:
                 raise RuntimeError("no_calibration: no usable FIXED_METADATA.json for this clip")
-            clip, err = batch_infer.extract_one(clip, cfg["fps"], cfg["ffmpeg_threads"])
+            clip, err = clip_prep.extract_one(clip, cfg["fps"], cfg["ffmpeg_threads"])
             if err:
                 raise RuntimeError(f"frame extraction failed: {err}")
             if clip.get("fixed_intrinsics_str") is None:
