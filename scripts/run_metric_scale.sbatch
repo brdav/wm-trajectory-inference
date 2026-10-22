@@ -54,6 +54,7 @@ TRAJ_ROOT="${TRAJ_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/nat
 PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
 WORK_DIR="${WORK_DIR:-${SCRATCH:-/tmp}/natix_metric_scale_work}"
 REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
+EDF_ENV="${EDF_ENV:-vggtslam_env_ext}"  # Pyxis environment (container image) the GPU steps run in; includes osmium for GPS fusion
 SELF="$REPO_DIR/scripts/run_metric_scale.sbatch"
 STOP_FILE="$PIPELINE_DIR/STOP"
 RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
@@ -101,7 +102,7 @@ else
     echo "=== step 2 skipped: $QC_CSV is up to date"
 fi
 
-srun --environment=vggtslam_env python3 -u "$REPO_DIR/scripts/estimate_metric_scale.py" \
+srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/estimate_metric_scale.py" \
     --pipeline_dir "$PIPELINE_DIR" \
     --work_dir "$WORK_DIR" \
     --qc_csv "$QC_CSV" \

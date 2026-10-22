@@ -6,14 +6,14 @@ Designed to be launched
 once inside an allocation that already has the vggtslam_image container attached, e.g.:
 
     # Single clip:
-    srun --environment=vggtslam_env python scripts/batch_infer.py \\
+    srun --environment=vggtslam_env_ext python scripts/batch_infer.py \\
         --video /capstor/.../FRONT_FOLDER/FRONT_2025-09-10_17-04-42.mp4 \\
         --out_dir /capstor/store/cscs/swissai/ab036/.../poses_out/france \\
         --num_gpus 1
 
     # Everything listed in the dataset's sample manifest (what scripts/run_full_dataset.sbatch does; the
     # manifest, dataset root and output root default to the natix locations, see vggt_slam/sample_manifest.py):
-    srun --environment=vggtslam_env python scripts/batch_infer.py --num_gpus 4
+    srun --environment=vggtslam_env_ext python scripts/batch_infer.py --num_gpus 4
 
 Architecture:
   - One persistent GPU worker process per GPU (--num_gpus x --workers_per_gpu), each loading
@@ -93,7 +93,6 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 os.environ.setdefault("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=4000000")
 
 sys.path.insert(0, str(REPO_DIR))
-from vggt_slam.map_match import ensure_osmium
 from vggt_slam.paths import DATASET_ROOT, SAMPLE_MANIFEST, TRAJ_ROOT
 from vggt_slam.pipeline_params import SlamParams
 from vggt_slam.regions import region_candidates
@@ -525,11 +524,6 @@ def main():
     if args.video and not args.out_dir:
         parser.error("--video requires --out_dir")
     # without --video this is batch mode over --sample_manifest (dataset root / out root default to the natix locations)
-
-    if args.gps_fusion:
-        # GPS fusion's road-network crop needs osmium; a failed install only loses fusion for the clips
-        # (each degrades gracefully), it must not abort a long batch
-        ensure_osmium()
 
     osm_extracts_dir = args.osm_extracts_dir
     if osm_extracts_dir is None and not args.video:

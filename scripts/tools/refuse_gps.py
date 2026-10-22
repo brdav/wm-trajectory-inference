@@ -28,7 +28,7 @@ CPU-only (no GPU worker, no torch) -- doesn't need vggt_slam's model backends at
 map_matching_2 (subprocess) + osmium (local OSM crop), so this can and does use far more
 parallelism than the original 16-GPU-worker pipeline.
 
-Usage (inside the vggtslam_env container -- needs osmium + the map_matching_2 binary):
+Usage (inside the vggtslam_env_ext container -- needs osmium + the map_matching_2 binary):
     pip install --quiet osmium   # once, before this script's own workers fork (see main())
     python3 scripts/tools/refuse_gps.py --dataset_root .../datasets/natix --out_root .../natix_traj \\
         [--num_workers 64] [--limit 20] [--countries Belgium Austria]

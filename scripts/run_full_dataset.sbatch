@@ -64,6 +64,7 @@ PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
 export TORCH_HOME="${TORCH_HOME:-/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home}"
 export HF_HOME="${HF_HOME:-/iopsstor/scratch/cscs/dbrggema/hf_home}"
 REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
+EDF_ENV="${EDF_ENV:-vggtslam_env_ext}"  # Pyxis environment (container image) the GPU steps run in; includes osmium for GPS fusion
 STOP_FILE="$PIPELINE_DIR/STOP"
 RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
 MAX_RESUBMITS=40  # generous headroom over the ~8 links a 90h run at 12h/job would need -- a
@@ -103,7 +104,7 @@ trap 'echo "=== $(date -Iseconds) job $SLURM_JOB_ID: caught SIGUSR1, walltime ap
 
 echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME ==="
 
-srun --environment=vggtslam_env python3 -u "$REPO_DIR/scripts/batch_infer.py" \
+srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/batch_infer.py" \
     --dataset_root "$DATASET_ROOT" \
     --out_root "$TRAJ_ROOT" \
     --sample_manifest "$SAMPLE_MANIFEST" \
@@ -122,7 +123,7 @@ if [ "$EXIT_CODE" -eq 0 ]; then
     # --min_age_days 0: this job's batch_infer.py has just finished, nothing is still writing. Sessions that
     # already have a zip get the new clips merged in; sessions with a clip still missing stay loose.
     echo "=== $(date -Iseconds) packing sessions into zips"
-    srun --environment=vggtslam_env python3 -u "$REPO_DIR/scripts/pack_sessions.py" \
+    srun --environment="$EDF_ENV" python3 -u "$REPO_DIR/scripts/pack_sessions.py" \
         --dataset_root "$DATASET_ROOT" \
         --out_root "$TRAJ_ROOT" \
         --sample_manifest "$SAMPLE_MANIFEST" \

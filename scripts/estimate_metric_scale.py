@@ -23,7 +23,7 @@ so an interrupted run can simply be rerun. One line per clip goes to <pipeline_d
 Treat the scale as ~+-10% accurate (validation: memory/qc-validation.md).
 
 Run inside the container, e.g.:
-    srun --environment=vggtslam_env python3 scripts/estimate_metric_scale.py \\
+    srun --environment=vggtslam_env_ext python3 scripts/estimate_metric_scale.py \\
         --qc_csv <pipeline_dir>/clip_qc.csv --num_gpus 4 --workers_per_gpu 2
 Needs dino_salad.ckpt + the DINOv2 hub repo in torch.hub's cache (same as batch_infer.py) and the
 DA3METRIC-LARGE weights (HF_HOME, or network access to download them).

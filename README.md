@@ -3,9 +3,10 @@
 ## Quick start
 
 A pre-built image is ready to use on Clariden — no build step needed. Register it as the
-Pyxis environment `vggtslam_env` (image itself at
-`/capstor/store/cscs/swissai/ab036/containers/vggtslam_image.sqsh`), so every command below just
-runs as `srun --environment=vggtslam_env <command>`.
+Pyxis environment `vggtslam_env_ext` (`~/.edf/vggtslam_env_ext.toml`, image itself at
+`/capstor/store/cscs/swissai/ab036/containers/vggtslam_image_ext.sqsh`), so every command below just
+runs as `srun --environment=vggtslam_env_ext <command>`. (The older `vggtslam_env` image lacks `osmium`, which
+GPS fusion needs; the sbatch files take the environment from `EDF_ENV`.)
 
 Below are the commands used to process Natix:
 
@@ -108,8 +109,8 @@ podman build -t vggtslam_image .
 enroot import -o vggtslam_image.sqsh podman://vggtslam_image
 ```
 (To make this the new pre-built image everyone else uses, copy the resulting `.sqsh` over
-`/capstor/store/cscs/swissai/ab036/containers/vggtslam_image.sqsh` -- that path is what
-`vggtslam_env`'s Pyxis definition, `~/.edf/vggtslam_env.toml`, points at.)
+`/capstor/store/cscs/swissai/ab036/containers/vggtslam_image_ext.sqsh` -- that path is what
+`vggtslam_env_ext`'s Pyxis definition, `~/.edf/vggtslam_env_ext.toml`, points at.)
 
 
 ## Where everything lives (`trajectories/`)
