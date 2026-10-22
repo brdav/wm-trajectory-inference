@@ -50,47 +50,15 @@
 
 set -uo pipefail
 
-TRAJ_ROOT="${TRAJ_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories}"  # override to run on another output folder
-PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
-WORK_DIR="${WORK_DIR:-${SCRATCH:-/tmp}/natix_metric_scale_work}"
 REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
-EDF_ENV="${EDF_ENV:-vggtslam_env_ext}"  # Pyxis environment (container image) the GPU steps run in; includes osmium for GPS fusion
 SELF="$REPO_DIR/scripts/metric_scale/run_metric_scale.sbatch"
-STOP_FILE="$PIPELINE_DIR/STOP"
-RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
 MAX_RESUBMITS=20
+source "$REPO_DIR/scripts/slurm_common.sh"  # TRAJ_ROOT, PIPELINE_DIR, EDF_ENV, TORCH_HOME, HF_HOME, resubmit_or_stop, SIGUSR1 trap
+WORK_DIR="${WORK_DIR:-${SCRATCH:-/tmp}/natix_metric_scale_work}"
 QC_CSV="$PIPELINE_DIR/clip_qc.csv"
 CPU_PY="${CPU_PY:-/users/dbrggema/miniconda3/envs/wm_env/bin/python}"  # CPU-only steps (clip_qc, zip integration, manifest)
 EXTRA_ARGS="${EXTRA_ARGS:-}"  # override: sbatch --export=ALL,EXTRA_ARGS=--retry_failed scripts/metric_scale/run_metric_scale.sbatch
-
-# Torch hub cache with dino_salad.ckpt + the DINOv2 hub repo (the SLAM loop-closure model needs
-# both; ~/.cache/torch/hub currently lacks them) and the HF cache holding DA3METRIC-LARGE (it is
-# downloaded there on first use if missing and the node has internet).
-export TORCH_HOME="${TORCH_HOME:-/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home}"
-export HF_HOME="${HF_HOME:-/iopsstor/scratch/cscs/dbrggema/hf_home}"
-
-mkdir -p "$PIPELINE_DIR/logs" "$WORK_DIR"
-
-# Read once up front, while the filesystem is quiet (same reason as run_full_dataset.sbatch).
-RESUBMIT_COUNT=$(cat "$RESUBMIT_COUNT_FILE" 2>/dev/null || echo 0)
-
-resubmit_or_stop() {
-    local reason="$1"
-    if [ -f "$STOP_FILE" ]; then
-        echo "=== $STOP_FILE present, not resubmitting ($reason) ==="
-        return
-    fi
-    RESUBMIT_COUNT=$((RESUBMIT_COUNT + 1))
-    if [ "$RESUBMIT_COUNT" -gt "$MAX_RESUBMITS" ]; then
-        echo "=== hit MAX_RESUBMITS=$MAX_RESUBMITS -- stopping instead of retrying ($reason); investigate before resetting $RESUBMIT_COUNT_FILE ===" >&2
-        return
-    fi
-    echo "=== resubmitting (#$RESUBMIT_COUNT) to continue processing remaining clips ($reason) ==="
-    sbatch "$SELF"
-    echo "$RESUBMIT_COUNT" > "$RESUBMIT_COUNT_FILE" 2>/dev/null || true
-}
-
-trap 'echo "=== $(date -Iseconds) job $SLURM_JOB_ID: caught SIGUSR1, walltime approaching -- resubmitting before hard kill ==="; resubmit_or_stop "walltime signal"; exit 0' SIGUSR1
+mkdir -p "$WORK_DIR"
 
 echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME; TRAJ_ROOT=$TRAJ_ROOT WORK_DIR=$WORK_DIR ==="
 

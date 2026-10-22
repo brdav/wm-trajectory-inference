@@ -54,53 +54,12 @@
 
 set -uo pipefail
 
-TRAJ_ROOT="${TRAJ_ROOT:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories}"
+REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
+SELF="$REPO_DIR/scripts/slam/run_full_dataset.sbatch"
+MAX_RESUBMITS=40  # generous headroom over the ~8 links a 90h run at 12h/job would need
+source "$REPO_DIR/scripts/slurm_common.sh"  # TRAJ_ROOT, PIPELINE_DIR, EDF_ENV, TORCH_HOME, HF_HOME, resubmit_or_stop, SIGUSR1 trap
 DATASET_ROOT="${DATASET_ROOT:-/capstor/store/cscs/swissai/ab036/datasets/natix}"
 SAMPLE_MANIFEST="${SAMPLE_MANIFEST:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/manifest/samples_24fps.parquet}"
-PIPELINE_DIR="$TRAJ_ROOT/_pipeline"
-
-# The SLAM loop-closure model (SALAD) needs dino_salad.ckpt and the DINOv2 torch.hub repo in a torch hub cache
-# (README, "Model weights"); the depth model weights are downloaded into HF_HOME on first use.
-export TORCH_HOME="${TORCH_HOME:-/iopsstor/scratch/cscs/dbrggema/metric_scale/torch_home}"
-export HF_HOME="${HF_HOME:-/iopsstor/scratch/cscs/dbrggema/hf_home}"
-REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"  # sbatch runs a copy of this script, so it cannot locate the checkout itself
-EDF_ENV="${EDF_ENV:-vggtslam_env_ext}"  # Pyxis environment (container image) the GPU steps run in; includes osmium for GPS fusion
-STOP_FILE="$PIPELINE_DIR/STOP"
-RESUBMIT_COUNT_FILE="$PIPELINE_DIR/.resubmit_count"
-MAX_RESUBMITS=40  # generous headroom over the ~8 links a 90h run at 12h/job would need -- a
-                   # backstop against silently burning allocation hours if something is stuck
-                   # crash-looping on the same clip (see batch_infer.py's per-clip try/except:
-                   # a crash that kills the whole process, e.g. an OOM, doesn't mark that clip as
-                   # failed, so a resubmitted job retries the exact same clip from scratch).
-
-mkdir -p "$PIPELINE_DIR/logs"
-
-# Read once here, at script start, before the GPU workers start loading the shared filesystem: a read inside the
-# SIGUSR1 trap once blocked the resubmit (memory/performance-investigations.md).
-RESUBMIT_COUNT=$(cat "$RESUBMIT_COUNT_FILE" 2>/dev/null || echo 0)
-
-# Shared by both the SIGUSR1 (walltime-approaching) handler and the normal post-exit path below,
-# so STOP_FILE / MAX_RESUBMITS are honored no matter which path triggers the resubmit.
-resubmit_or_stop() {
-    local reason="$1"
-    if [ -f "$STOP_FILE" ]; then
-        echo "=== $STOP_FILE present, not resubmitting ($reason) ==="
-        return
-    fi
-    RESUBMIT_COUNT=$((RESUBMIT_COUNT + 1))
-    if [ "$RESUBMIT_COUNT" -gt "$MAX_RESUBMITS" ]; then
-        echo "=== hit MAX_RESUBMITS=$MAX_RESUBMITS (this is resubmission #$RESUBMIT_COUNT) --" \
-             "stopping instead of continuing to retry ($reason); investigate before resetting" \
-             "$RESUBMIT_COUNT_FILE ===" >&2
-        return
-    fi
-    echo "=== resubmitting (#$RESUBMIT_COUNT) to continue processing remaining clips ($reason) ==="
-    sbatch "$0"
-    # Written AFTER sbatch, best effort: a slow write must never block the chain.
-    echo "$RESUBMIT_COUNT" > "$RESUBMIT_COUNT_FILE" 2>/dev/null || true
-}
-
-trap 'echo "=== $(date -Iseconds) job $SLURM_JOB_ID: caught SIGUSR1, walltime approaching -- resubmitting before hard kill ==="; resubmit_or_stop "walltime signal"; exit 0' SIGUSR1
 
 echo "=== $(date -Iseconds) job $SLURM_JOB_ID starting on $SLURMD_NODENAME ==="
 
