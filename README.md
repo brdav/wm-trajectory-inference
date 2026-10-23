@@ -56,6 +56,8 @@ scripts/tools/                      maintenance and visualization, not needed to
   overlay_trajectory_on_video.py      draw a clip's future trajectory onto its video
 scripts/osm_maps/                   separate product: ego-centred OSM map images for the clips (consumes the fused trajectories)
   osm_bev.py  make_osm_maps.py  make_osm_report.py  run_osm_prepare.sbatch  run_osm_maps.sbatch
+scripts/satellite/                  separate product: aerial image crops for the same samples as the OSM maps (open orthophotos only)
+  sources.py  fetch_tiles.py  run_fetch_tiles.sbatch  make_sat_images.py  run_sat_images.sbatch  render_sat.py  LICENSES.md (+ tiles, cog, sheets, import_tiles, summarize_images)
 ```
 
 The scripts are thin drivers: the logic is in `vggt_slam/` (`pipeline.py` per-clip SLAM, `fusion.py` GPS fusion,
