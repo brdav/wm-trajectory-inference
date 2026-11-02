@@ -53,3 +53,9 @@ def test_missing_metadata_or_unreadable_video(tmp_path):
     (tmp_path / "session" / "FIXED_METADATA.json").unlink()
     assert clip_prep.resolve_camera_meta(video) is None
     assert clip_prep.read_mp4_dims(tmp_path / "nope.mp4") is None
+
+
+def test_lower_case_metadata_file_name(tmp_path):
+    video = make_clip(tmp_path, CAM)
+    (tmp_path / "session" / "FIXED_METADATA.json").rename(tmp_path / "session" / "fixed_metadata.json")
+    assert clip_prep.resolve_camera_meta(video)["fx"] == 1500.0

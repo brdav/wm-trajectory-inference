@@ -37,7 +37,8 @@ resubmit_or_stop() {
         return
     fi
     echo "=== resubmitting (#$RESUBMIT_COUNT) to continue processing remaining clips ($reason) ==="
-    sbatch "$SELF"
+    # --output: the #SBATCH --output line of the job scripts is fixed to the natix folder; keep logs under this TRAJ_ROOT
+    sbatch --output="$PIPELINE_DIR/logs/%x_%j.log" "$SELF"
     # Written AFTER sbatch, best effort: a slow write must never block the chain.
     echo "$RESUBMIT_COUNT" > "$RESUBMIT_COUNT_FILE" 2>/dev/null || true
 }

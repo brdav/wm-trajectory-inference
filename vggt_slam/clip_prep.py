@@ -80,8 +80,10 @@ def resolve_camera_meta(video_path):
     near the actual frame's center) instead of trusting the declared reference resolution.
     """
     try:
-        meta_path = video_path.parents[2] / "FIXED_METADATA.json"
-        if not meta_path.exists():
+        # the natix-jp-uk delivery spells it in lower case
+        meta_path = next((p for p in (video_path.parents[2] / n for n in ("FIXED_METADATA.json", "fixed_metadata.json"))
+                          if p.exists()), None)
+        if meta_path is None:
             return None
         meta = json.loads(meta_path.read_text())
         cam = next((d for d in meta.get("device_extrinsics", []) if d.get("device_name") == "camera_front"), None)

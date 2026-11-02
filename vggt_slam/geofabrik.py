@@ -22,6 +22,7 @@ EUROPE_COUNTRIES = {
     "Liechtenstein": "liechtenstein", "Latvia": "latvia", "Netherlands": "netherlands",
     "Poland": "poland", "Portugal": "portugal", "Romania": "romania", "Slovenia": "slovenia",
     "Spain": "spain", "Sweden": "sweden", "Switzerland": "switzerland",
+    "United Kingdom": "united-kingdom",
 }
 EUROPE_PREFIX = "europe"
 

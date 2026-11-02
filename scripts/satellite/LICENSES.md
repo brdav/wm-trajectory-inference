@@ -71,7 +71,7 @@ Samples whose region (or part of a region) has no open imagery get no satellite 
 
 ## Not covered yet (tiles at zoom 18, whole dataset, 2026-10-23)
 
-Italy 167k, Finland 77k and Sweden 47k (credentials/key needed), Ireland 36k, Croatia 28k, Greece 21k, Romania 20k, Germany 18k
+Italy 167k and Sweden 47k (credentials needed; Finland is now fully covered through HSY + the NLS/Kapsi mirror, fetched 2026-10-23), Ireland 36k, Croatia 28k, Greece 21k, Romania 20k, Germany 18k
 (Hamburg: no working open endpoint; BKG's national DOP is blocked by a WAF and not open), Hungary 14k, Canada 10k
 (Vancouver, Winnipeg), Iceland 8k, Latvia 1.3k, Liechtenstein 0.6k, of 1.83M tiles in total (about 25 %).
 Belgium: Wallonia (SPW ORTHO_LAST, no open licence found) and Brussels (UrbIS, CC0 for 2022/2024) are not routed;

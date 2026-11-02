@@ -23,7 +23,7 @@ COUNTRY_CENTROIDS = {
     "Liechtenstein": (47.17, 9.53), "Netherlands": (52.2, 5.5), "Poland": (52.0, 19.5),
     "Portugal": (39.6, -8.0), "Puerto Rico": (18.2, -66.5), "Romania": (45.9, 24.9),
     "Slovenia": (46.1, 14.8), "Spain": (40.0, -4.0), "Sweden": (62.0, 15.0),
-    "Switzerland": (46.8, 8.2),
+    "Switzerland": (46.8, 8.2), "United Kingdom": (54.0, -2.5),
 }
 
 
