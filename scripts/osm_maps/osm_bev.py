@@ -1420,7 +1420,8 @@ class MapRenderer:
             lat=lat, lon=lon, heading_deg=heading_deg, heading_up=self.heading_up, country=country,
             countries_with_data=found, drive_side=side, meters_per_px=self.res, px=self.px,
             half_extent_m=self.half, n_features=len(rows)),
-            scene=dict(roads=roads, nodes=nodes, crossings_way=crossings_way, to_local=to_local, side=side))
+            scene=dict(roads=roads, nodes=nodes, crossings_way=crossings_way, to_local=to_local, side=side,
+                       region=country))
 
 
 # --------------------------------------------------------------------------------------

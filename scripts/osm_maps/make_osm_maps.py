@@ -34,9 +34,9 @@ length, snippet errors, ...), unplottable*.jsonl and done_sessions*.txt. Re-runn
 done_sessions (--overwrite redoes them); for Slurm arrays use --shard i/N (every shard writes its own
 *.shard<i>of<N> files).
 
-Route text (scripts/osm_maps/osm_route_text.py; --no-text skips it): for every image also what a forward camera would see
-along the 5 s path (the road's class / one-way / lanes / speed limit, signs, lights, crossings and bumps facing the direction of
-travel, the manoeuvre). The structured record is entry text.jsonl of the session zip (one line per image, keyed by `name` =
+Route text (scripts/osm_maps/osm_route_text.py; --no-text skips it): for every image also the location (country, nearest
+city / town / village from extract_places.py) and what a forward camera would see along the 5 s path (the road's class /
+one-way / lanes / speed limit, signs, lights, crossings and bumps facing the direction of travel, the manoeuvre). The structured record is entry text.jsonl of the session zip (one line per image, keyed by `name` =
 the image entry), the sentence made from it (`caption`) is also in the index. Lane counts / limits taken from a neighbouring
 road carry source "inferred".
 
@@ -175,8 +175,9 @@ def _turn_deg(path):
 _R = {}
 
 
-def _init(osm_data, res):
+def _init(osm_data, res, places):
     _R["mr"] = ob.MapRenderer(osm_data, res=res)
+    _R["places"] = rt.PlaceIndex(places) if places else None
 
 
 def _has_map_data(mr, lat, lon):
@@ -273,7 +274,7 @@ def process_clip(row, samples, a, files, texts):
             if a["save_mask"]:
                 files.append((name + "_path.png", cv2.imencode(".png", ((img != base).any(axis=2) * 255).astype(np.uint8),
                                                               [cv2.IMWRITE_PNG_COMPRESSION, 9])[1].tobytes()))
-        route = rt.describe_route(o["scene"], ll, tau - t0) if a["text"] and option != "none" else None
+        route = rt.describe_route(o["scene"], ll, tau - t0, _R["places"]) if a["text"] and option != "none" else None
         if route is not None:
             texts.append(dict(name=name + a["ext"], sample_id=smp["sample_id"], caption=rt.caption(route), **route))
         records.append(dict(
@@ -349,6 +350,8 @@ def main():
     ap.add_argument("--max-per-clip", type=int, default=100, help="maximum number of images per clip")
     ap.add_argument("--res", type=float, default=0.5, help="map resolution in m/pixel")
     ap.add_argument("--workers", type=int, default=8, help="worker processes (each loads its own MapRenderer)")
+    ap.add_argument("--places", help="places parquet of extract_places.py for the city in the route text "
+                                     "(default: <osm-data>/_places.parquet if it exists)")
     ap.add_argument("--no-text", action="store_true", help="skip the route descriptions (text.jsonl in every zip, caption in the index)")
     ap.add_argument("--save-mask", action="store_true", help="also write the path layer as *_path.png (binary mask)")
     ap.add_argument("--save-map-only", action="store_true", help="also write the view without the path as *_map.png")
@@ -382,6 +385,8 @@ def main():
     print(f"{len(rows)} fused clips selected -> {n_samples} samples in {a.samples}; path={a.path}; horizon={a.horizon}s",
           flush=True)
 
+    places = a.places or (str(Path(a.osm_data) / "_places.parquet") if (Path(a.osm_data) / "_places.parquet").exists() else None)
+    print(f"places for the route text: {places or 'none (country only)'}", flush=True)
     Path(a.out).mkdir(parents=True, exist_ok=True)
     args = dict(path=a.path, out=a.out, dataset_root=a.dataset_root, traj_root=a.traj_root, horizon=a.horizon,
                 ext=".webp" if a.format == "webp" else ".png", png_level=a.png_level,
@@ -404,7 +409,7 @@ def main():
 
     skipped, n_img = collections.Counter(), 0
     with open(Path(a.out) / f"index{tag}.jsonl", "a") as index, open(Path(a.out) / f"unplottable{tag}.jsonl", "a") as unplot, \
-            open(done_file, "a") as donef, mp.Pool(a.workers, initializer=_init, initargs=(a.osm_data, a.res)) as pool:
+            open(done_file, "a") as donef, mp.Pool(a.workers, initializer=_init, initargs=(a.osm_data, a.res, places)) as pool:
         for i, (sess, n, sk, recs, unp) in enumerate(pool.imap_unordered(process_session, jobs, chunksize=1), 1):
             skipped.update(sk)
             for u in unp:

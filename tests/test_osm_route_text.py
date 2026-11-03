@@ -18,7 +18,8 @@ def node(cls, x, y, direction=0, sub="", osm_id=100):
 
 
 def scene(roads, nodes=(), crossings=()):
-    return dict(roads=list(roads), nodes=list(nodes), crossings_way=list(crossings), to_local=lambda a: a, side="right")
+    return dict(roads=list(roads), nodes=list(nodes), crossings_way=list(crossings), to_local=lambda a: a, side="right",
+                region="United States_Nevada")
 
 
 TIMES = np.linspace(0.0, 5.0, 51)
@@ -109,3 +110,25 @@ def test_road_change_is_described_by_distance_and_a_pass_at_the_start_is_at_the_
     assert [(s["osm_id"], s["dist_start_m"]) for s in d["roads"]][1][0] == 2
     cap = rt.caption(d)
     assert "After about 20 m it is on a primary road." in cap and "At the start: a give-way sign" in cap
+
+
+def test_location_line_and_ego_vehicle_wording(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    f = tmp_path / "places.parquet"
+    pq.write_table(pa.table(dict(name=["Reno", "Tiny"], kind=["city", "village"], lat=[0.0, 0.0], lon=[0.0, 0.5],
+                                 population=[0, 0])), f)
+    places = rt.PlaceIndex(f)
+    main = road([(0, -30), (0, 100)])
+    # to_local is the identity here, so "lon/lat" of the path start (0, 0) is also the position of Reno
+    d = rt.describe_route(scene([main]), north(), TIMES, places)
+    assert d["location"] == dict(country="United States", state="Nevada", place="Reno", place_kind="city",
+                                 place_distance_km=0.0, within_place=True)
+    cap = rt.caption(d)
+    assert cap.startswith("Location: Reno, Nevada, United States. The ego vehicle is on a residential street")
+    assert "The car" not in cap
+    assert places.nearest(0.0, 0.02)["within"] is True and places.nearest(0.0, 0.2)["within"] is False   # 22 km from Reno: "near"
+    assert places.nearest(40.0, 40.0) is None                                                           # nothing within 3 radii
+    far = dict(d["location"], place=None, within_place=None)
+    assert rt._location_phrase(far) == "Nevada, United States"
+    assert "Location" not in rt.caption(dict(d, location=dict(far, country=None)))

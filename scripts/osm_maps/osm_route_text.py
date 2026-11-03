@@ -17,7 +17,7 @@ import numpy as np
 import shapely
 from shapely.strtree import STRtree
 
-from osm_bev import NON_VEHICLE
+from osm_bev import NON_VEHICLE, country_of
 
 VERSION = 1
 ROAD_MATCH_M = 8.0        # a path point is matched to roads within this distance
@@ -30,6 +30,46 @@ LATERAL_M = dict(stop=12.0, give_way=12.0, signals=10.0, crossing=3.0, calming=3
                  mini_roundabout=3.5, bus_stop=12.0)
 UNKNOWN_FACING_LATERAL_M = 3.0   # stop / give way without a mapped direction: only if the node lies on the driven road
 DEDUPE_M = 8.0                   # events of one type closer than this along the path are one event
+
+
+class PlaceIndex:
+    """Nearest city / town / village (extract_places.py output) for the "Location" line. A place node is the centre of the
+    settlement, so each kind has a radius up to which a point counts as inside it; the place with the smallest
+    distance / radius wins, and nothing is reported beyond MAX_RATIO radii."""
+    RADIUS_KM = dict(city=12.0, town=4.0, village=1.5)
+    MAX_RATIO = 3.0
+
+    def __init__(self, path):
+        import pyarrow.parquet as pq
+        t = pq.read_table(path).to_pydict()
+        self.name, self.kind = t["name"], t["kind"]
+        self.xyz = self._unit_xyz(np.array(t["lat"]), np.array(t["lon"]))     # km on the sphere; a query scans all (~1 ms)
+        self.radius = np.array([self.RADIUS_KM[k] for k in self.kind])
+
+    @staticmethod
+    def _unit_xyz(lat, lon):
+        la, lo = np.radians(lat), np.radians(lon)
+        return 6371.0 * np.column_stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)])
+
+    def nearest(self, lat, lon):
+        """-> dict(name, kind, distance_km, within) or None."""
+        if not len(self.name):
+            return None
+        d = np.linalg.norm(self.xyz - self._unit_xyz(np.array([lat]), np.array([lon]))[0], axis=1)
+        i = int(np.argmin(d / self.radius))
+        ratio, dist = float(d[i] / self.radius[i]), float(d[i])
+        if ratio > self.MAX_RATIO:
+            return None
+        return dict(name=self.name[i], kind=self.kind[i], distance_km=round(dist, 1), within=ratio <= 1.0)
+
+
+def _location(region, lat, lon, places):
+    """Country (and US state) from the map region the position falls in, the nearest settlement from `places`."""
+    state = region.split("_", 1)[1] if region and "_" in region else None
+    place = places.nearest(lat, lon) if places is not None else None
+    return dict(country=country_of(region), state=state, place=place["name"] if place else None,
+                place_kind=place["kind"] if place else None, place_distance_km=place["distance_km"] if place else None,
+                within_place=place["within"] if place else None)
 
 
 def _unit(v):
@@ -131,9 +171,10 @@ def _tangents_at(tree, parts, pt, near_m=1.5, max_d=10.0):
     return [_tangent(parts[int(j)][0], parts[int(j)][0].project(pt)) for j in idx]
 
 
-def describe_route(scene, lonlat, times):
+def describe_route(scene, lonlat, times, places=None):
     """scene: the `scene` of MapRenderer.render (roads after inference, nodes, crossing ways, local frame).
-    lonlat: (N, 2) path in lon/lat, times: (N,) seconds since the sample start. -> JSON-serialisable dict."""
+    lonlat: (N, 2) path in lon/lat, times: (N,) seconds since the sample start, places: optional PlaceIndex.
+    -> JSON-serialisable dict."""
     to_local = scene["to_local"]
     xy = to_local(np.asarray(lonlat, float))
     times = np.asarray(times, float)
@@ -203,7 +244,9 @@ def describe_route(scene, lonlat, times):
                 kept.append(e)
         events = kept
 
-    return dict(version=VERSION, horizon_s=round(float(times[-1] - times[0]), 2), moving=moving,
+    lon0, lat0 = (float(v) for v in np.asarray(lonlat, float)[0])
+    return dict(version=VERSION, location=_location(scene.get("region"), lat0, lon0, places),
+                horizon_s=round(float(times[-1] - times[0]), 2), moving=moving,
                 path_length_m=round(length, 1), drive_side=scene["side"], maneuver=_maneuver(xy, times, length),
                 roads=segs, events=events)
 
@@ -262,14 +305,27 @@ def _event_phrase(e):
     return f"{_where(e['dist_from_start_m'], 'at about')}: {name}"
 
 
+def _location_phrase(loc):
+    """'Winterthur, Switzerland' / 'near Reno, Nevada, United States' / 'Japan'; None without a country."""
+    if not loc or not loc.get("country"):
+        return None
+    tail = ", ".join(v for v in (loc.get("state"), loc["country"]) if v)
+    if not loc.get("place"):
+        return tail
+    return f"{'' if loc['within_place'] else 'near '}{loc['place']}, {tail}"
+
+
 def caption(d):
     """One short paragraph from a describe_route dict."""
     m, out = d["maneuver"], []
+    loc = _location_phrase(d.get("location"))
+    if loc:
+        out.append(f"Location: {loc}.")
     if not d["roads"]:
         out.append("No mapped road near the path.")
     else:
         first = d["roads"][0]
-        out.append(("The car is on a " if d["moving"] else "The car is standing on a ") + _road_phrase(first) + ".")
+        out.append(("The ego vehicle is on a " if d["moving"] else "The ego vehicle is standing on a ") + _road_phrase(first) + ".")
         for s in d["roads"][1:]:
             if s["t_end_s"] - s["t_start_s"] >= 0.5 or s is d["roads"][-1]:
                 out.append(f"{_where(s['dist_start_m'], 'After about')[0].upper()}{_where(s['dist_start_m'], 'After about')[1:]} "
