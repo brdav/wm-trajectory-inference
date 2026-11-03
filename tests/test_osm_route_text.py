@@ -44,7 +44,7 @@ def test_maxspeed_none_is_no_speed_limit():
                           north(), TIMES)
     seg, = d["roads"]
     assert seg["speed_limit_kmh"] is None and seg["no_speed_limit"] and seg["speed_limit_source"] == "map"
-    assert "no speed limit" in rt.caption(d) and "140" not in rt.caption(d)
+    assert "no explicit speed limit" in rt.caption(d) and "140" not in rt.caption(d)
 
 
 def test_events_only_those_facing_travel_ahead_and_beside_the_path():

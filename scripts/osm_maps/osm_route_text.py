@@ -231,7 +231,7 @@ def _road_phrase(s):
         parts.append(f"{'probably ' if s['lanes_source'] == 'neighbour' else ''}{s['lanes']} "
                      f"lane{'s' if s['lanes'] > 1 else ''}")
     if s["no_speed_limit"]:
-        parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}no speed limit")
+        parts.append("no explicit speed limit" + (" (also on the adjoining road)" if s["speed_limit_source"] == "inferred" else ""))
     elif s["speed_limit_kmh"]:
         parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}{s['speed_limit_kmh']} km/h limit")
     if s["tunnel"]:
