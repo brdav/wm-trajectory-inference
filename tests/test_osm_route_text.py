@@ -9,7 +9,7 @@ import osm_route_text as rt
 
 
 def road(coords, osm_id=1, cls="residential", oneway=0, nl=0, speed=0.0, src=None):
-    return dict(g=shapely.LineString(coords), osm_id=osm_id, cls=cls, oneway=oneway, tunnel=False, nl=nl,
+    return dict(g=shapely.LineString(coords), osm_id=osm_id, cls=cls, oneway=oneway, tunnel=False, layer=0, nl=nl,
                 lsrc="map" if nl else None, speed=speed, src=src)
 
 
@@ -76,7 +76,7 @@ def test_stop_sign_without_direction_is_flagged_and_needs_to_be_on_the_driven_ro
     main = road([(0, -30), (0, 100)], osm_id=1)
     d = rt.describe_route(scene([main, cross], [node("stop", 0, 20, osm_id=1), node("stop", 30, 20, osm_id=2)]),
                           north(), TIMES)
-    assert [(e["osm_id"], e["direction_known"]) for e in d["events"]] == [(1, False)]
+    assert [(e["osm_id"], e["direction_known"]) for e in d["events"] if e["type"] == "stop"] == [(1, False)]
     assert "possibly a stop sign" in rt.caption(d)
 
 
@@ -132,3 +132,49 @@ def test_location_line_and_ego_vehicle_wording(tmp_path):
     far = dict(d["location"], place=None, within_place=None)
     assert rt._location_phrase(far) == "Nevada, United States"
     assert "Location" not in rt.caption(dict(d, location=dict(far, country=None)))
+
+
+def _way(coords, osm_id, cls="residential", layer=0):
+    r = road(coords, osm_id=osm_id, cls=cls)
+    r["layer"] = layer
+    return r
+
+
+def _events(roads, ids=None, kinds=("intersection", "roundabout")):
+    d = rt.describe_route(scene(roads), north(), TIMES, None, ids)
+    return [e for e in d["events"] if e["type"] in kinds]
+
+
+def test_four_way_intersection_of_two_through_roads_and_a_t_junction():
+    main = _way([(0, -30), (0, 20), (0, 100)], 1)                  # passes through the shared node at (0, 20)
+    cross = _way([(-50, 20), (0, 20), (50, 20)], 2)
+    (e,) = _events([main, cross])
+    assert e["type"] == "intersection" and e["arms"] == 4 and abs(e["dist_from_start_m"] - 20.0) < 1.0
+    assert "a 4-way intersection" in rt._event_phrase(e)
+    side = _way([(0, 20), (40, 20)], 3)                            # a side road that ends on the main road: 2 + 1 arms
+    (e,) = _events([main, side])
+    assert e["arms"] == 3
+
+
+def test_no_intersection_for_continuations_service_roads_bridges_or_junctions_behind_the_start():
+    a, b = _way([(0, -30), (0, 20)], 1), _way([(0, 20), (0, 100)], 2)             # two ways end to end: 2 arms
+    assert _events([a, b]) == []
+    main = _way([(0, -30), (0, 100)], 1)
+    assert _events([main, _way([(-30, 20), (0, 20), (30, 20)], 2, cls="service")]) == []        # driveway / parking aisle
+    assert _events([main, _way([(-30, 20), (30, 20)], 2, layer=1)]) == []                       # bridge over the road
+    assert _events([main, _way([(-30, -10), (30, -10)], 2)]) == []                             # behind the start
+
+
+def test_roundabout_needs_the_tag_and_counts_its_exits():
+    th = np.linspace(0, 2 * np.pi, 33)
+    pts = np.column_stack([12 * np.cos(th), 30 + 12 * np.sin(th)])
+    pts[[0, 8, 24]] = [(12, 30), (0, 42), (0, 18)]                                         # vertices the arms attach to
+    pts[-1] = pts[0]                                                                       # exactly closed, like an OSM ring
+    ring = _way(pts.tolist(), 10)                                                          # ahead, centre 30 m
+    ring["oneway"] = 1
+    arms = [_way([(0, -30), (0, 18)], 11), _way([(0, 42), (0, 100)], 12), _way([(12, 30), (60, 30)], 13)]
+    assert all(e["type"] != "roundabout" for e in _events([ring] + arms, set()))          # untagged: not a roundabout
+    ev = _events([ring] + arms, {10})
+    assert [e["type"] for e in ev] == ["roundabout"] and ev[0]["exits"] == 3
+    assert abs(ev[0]["dist_from_start_m"] - 18.0) < 1.5
+    assert rt._event_phrase(ev[0]).endswith("a roundabout with 3 exits")

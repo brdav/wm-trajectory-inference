@@ -27,9 +27,12 @@ NO_LIMIT_KMH = 140.0      # osm_bev.parse_speed_kmh turns maxspeed=none (no limi
 MIN_MOVE_M = 2.0          # shorter paths = standing still
 # largest lateral distance (m) from the path at which an event is reported
 LATERAL_M = dict(stop=12.0, give_way=12.0, signals=10.0, crossing=3.0, calming=3.5, level_crossing=3.5,
-                 mini_roundabout=3.5, bus_stop=12.0)
+                 mini_roundabout=3.5, bus_stop=12.0, intersection=6.0, roundabout=6.0)
 UNKNOWN_FACING_LATERAL_M = 3.0   # stop / give way without a mapped direction: only if the node lies on the driven road
-DEDUPE_M = 8.0                   # events of one type closer than this along the path are one event
+DEDUPE_M = dict(default=8.0, roundabout=40.0)   # events of one type closer than this along the path are one event
+JUNCTION_CLUSTER_M = 3.0         # crossing points of road pairs closer than this belong to one junction
+JUNCTION_TOUCH_M = 1.5           # a road counts as meeting a junction if it passes / ends within this of its centre
+MIN_ARMS = 3                     # arms (road ends at the junction, a through road = 2) needed for an intersection
 
 
 class PlaceIndex:
@@ -70,6 +73,77 @@ def _location(region, lat, lon, places):
     return dict(country=country_of(region), state=state, place=place["name"] if place else None,
                 place_kind=place["kind"] if place else None, place_distance_km=place["distance_km"] if place else None,
                 within_place=place["within"] if place else None)
+
+
+def load_roundabout_ids(path):
+    """Way ids tagged junction=roundabout (extract_places.py output) -> set of ints."""
+    import pyarrow.parquet as pq
+    return set(pq.read_table(path)["osm_id"].to_pylist())
+
+
+def _line_ends(g):
+    return [c for part in shapely.get_parts(g) for c in (part.coords[0], part.coords[-1])]
+
+
+def _junctions(roads, roundabout_ids):
+    """Topology of the scene's vehicle roads (service roads left out: driveways and parking aisles are no intersections).
+    -> (intersections [(centre Point, arms)], roundabouts [(way id, ring geometry, exits or None)]).
+    A road pair meets where their lines share a point on the same layer (OSM connects roads by shared nodes; a bridge sits on
+    another layer). Arms at a junction: each road end there counts 1, a road passing through counts 2. Two roads
+    ending at one point (a continuation) have 2 arms and are no intersection. Ways tagged junction=roundabout are reported
+    as roundabouts, never as intersections."""
+    by = {}
+    for r in roads:
+        if r["cls"] not in NON_VEHICLE and r["cls"] != "service":
+            by.setdefault(int(r["osm_id"]), []).append(r)
+    ways = {}
+    for i, rs in by.items():
+        g = shapely.union_all([r["g"] for r in rs])
+        ways[i] = dict(g=shapely.line_merge(g) if g.geom_type == "MultiLineString" else g,
+                       lv=(rs[0]["layer"], bool(rs[0]["tunnel"])))
+    ids = list(ways)
+    if len(ids) < 2:
+        return [], []
+    geoms = [ways[i]["g"] for i in ids]
+    tree = STRtree(geoms)
+    ring_ids = {i for i in ids if i in roundabout_ids}
+    pts, touching = [], {i: set() for i in ring_ids}
+    for a, b in zip(*tree.query(geoms, predicate="intersects")):
+        if a >= b or ways[ids[a]]["lv"] != ways[ids[b]]["lv"]:
+            continue
+        ia, ib = ids[a], ids[b]
+        for ring, other in ((ia, ib), (ib, ia)):
+            if ring in ring_ids and other not in ring_ids:
+                touching[ring].add(other)
+        if ia in ring_ids or ib in ring_ids:
+            continue
+        hit = shapely.intersection(geoms[a], geoms[b])
+        pts += [(p.x, p.y) for p in shapely.get_parts(hit) if p.geom_type == "Point"]
+    clusters = []
+    for p in pts:
+        for c in clusters:
+            if np.hypot(p[0] - c[0][0], p[1] - c[0][1]) < JUNCTION_CLUSTER_M:
+                c.append(p)
+                break
+        else:
+            clusters.append([p])
+    inter = []
+    for c in clusters:
+        centre = shapely.Point(*np.mean(c, axis=0))
+        arms = 0
+        for i in ids:
+            if i in ring_ids or ways[i]["g"].distance(centre) > JUNCTION_TOUCH_M:
+                continue
+            ends = sum(1 for e in _line_ends(ways[i]["g"]) if np.hypot(e[0] - centre.x, e[1] - centre.y) <= JUNCTION_TOUCH_M)
+            arms += ends or 2
+        if arms >= MIN_ARMS:
+            inter.append((centre, arms))
+    rounds = []
+    for i in ring_ids:
+        g = ways[i]["g"]
+        closed = g.geom_type == "LineString" and g.is_ring
+        rounds.append((i, g, len(touching[i]) if closed else None))
+    return inter, rounds
 
 
 def _unit(v):
@@ -171,9 +245,10 @@ def _tangents_at(tree, parts, pt, near_m=1.5, max_d=10.0):
     return [_tangent(parts[int(j)][0], parts[int(j)][0].project(pt)) for j in idx]
 
 
-def describe_route(scene, lonlat, times, places=None):
+def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
     """scene: the `scene` of MapRenderer.render (roads after inference, nodes, crossing ways, local frame).
-    lonlat: (N, 2) path in lon/lat, times: (N,) seconds since the sample start, places: optional PlaceIndex.
+    lonlat: (N, 2) path in lon/lat, times: (N,) seconds since the sample start, places: optional PlaceIndex,
+    roundabout_ids: set of way ids tagged junction=roundabout (without it roundabouts are not recognised).
     -> JSON-serialisable dict."""
     to_local = scene["to_local"]
     xy = to_local(np.asarray(lonlat, float))
@@ -196,7 +271,7 @@ def describe_route(scene, lonlat, times, places=None):
         tree = STRtree([p for p, _ in veh]) if veh else None
         half = max(abs(xy).max() + LOOKAHEAD_M, 1.0)
 
-        def add(kind, sub, pt, direction_known, node_id):
+        def add(kind, sub, pt, direction_known, node_id, **extra):
             s = float(ext.project(pt))
             q = np.array(ext.interpolate(s).coords[0])
             tan = _tangent(ext, s)
@@ -211,7 +286,7 @@ def describe_route(scene, lonlat, times, places=None):
                 type=kind, subtype=sub or None, t_s=None if beyond else round(float(np.interp(s, cum, times - times[0])), 2),
                 dist_from_start_m=round(s, 1), beyond_path=beyond, ahead_of_end_m=round(s - length, 1) if beyond else None,
                 side="left" if tan[0] * v[1] - tan[1] * v[0] > 0 else "right", lateral_m=round(lat, 1),
-                direction_known=direction_known, osm_id=node_id))
+                direction_known=direction_known, osm_id=node_id, **extra))
 
         for n in scene["nodes"]:
             kind, pt = n["cls"], n["g"]
@@ -236,11 +311,19 @@ def describe_route(scene, lonlat, times, places=None):
             if not hit.is_empty:
                 add("crossing", r["sub"], shapely.Point(*np.array(hit.representative_point().coords[0])), None,
                     int(r["osm_id"]))
+        inter, rounds = _junctions(roads, roundabout_ids or set())
+        for centre, arms in inter:
+            add("intersection", "", centre, None, None, arms=arms)
+        for way_id, ring, exits in rounds:
+            hit = shapely.get_coordinates(ring.intersection(ext.buffer(LATERAL_M["roundabout"])))
+            if len(hit):                                                  # where the path first comes within reach of the ring
+                first = min(hit, key=lambda c: ext.project(shapely.Point(*c)))
+                add("roundabout", "", shapely.Point(*first), None, way_id, exits=exits)
         events.sort(key=lambda e: e["dist_from_start_m"])
         kept = []
         for e in events:                                                  # one crossing drawn as node + way = one event
-            if not any(k["type"] == e["type"] and abs(k["dist_from_start_m"] - e["dist_from_start_m"]) < DEDUPE_M
-                       for k in kept):
+            if not any(k["type"] == e["type"] and abs(k["dist_from_start_m"] - e["dist_from_start_m"])
+                       < DEDUPE_M.get(e["type"], DEDUPE_M["default"]) for k in kept):
                 kept.append(e)
         events = kept
 
@@ -294,7 +377,11 @@ def _where(d, lead):
 
 
 def _event_phrase(e):
-    if e["type"] == "crossing":
+    if e["type"] == "intersection":
+        name = f"a {e['arms']}-way intersection"
+    elif e["type"] == "roundabout":
+        name = "a roundabout" + (f" with {e['exits']} exits" if e["exits"] else "")
+    elif e["type"] == "crossing":
         name = CROSSING_NAMES.get(e["subtype"], "a pedestrian crossing")
     else:
         name = EVENT_NAMES[e["type"]]
