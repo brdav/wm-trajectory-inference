@@ -50,39 +50,33 @@ def load_gps_fixes(csv_path):
     if not rows:
         raise ValueError(f"No rows in {csv_path}")
 
-    t0 = datetime.fromisoformat(rows[0]["timestamp"])
-    has_frame_number = "frame_number" in rows[0]
+    if "frame_number" not in rows[0]:
+        raise ValueError(f"No frame_number column in {csv_path}")
 
-    if has_frame_number:
-        wall_s = np.array([(datetime.fromisoformat(r["timestamp"]) - t0).total_seconds() for r in rows])
-        frame_number = np.array([int(r["frame_number"]) for r in rows], dtype=float)
-        if len(np.unique(wall_s)) < 2:
-            # np.polyfit needs >= 2 distinct wall-clock timestamps to fit a line's slope --
-            # with fewer, the least-squares design matrix is singular and numpy's LAPACK
-            # backend fails with an opaque "SVD did not converge" instead of a clear precondition
-            # error. Confirmed on 268 real clips, ALL with exactly 1 sensor-log row for the whole
-            # ~60s clip (a natix logging gap, not a code bug) -- raising here gives that a clear,
-            # categorizable status instead of an unrelated-looking numpy crash.
-            raise ValueError(
-                f"Only {len(rows)} sensor log row(s) ({len(np.unique(wall_s))} distinct "
-                f"timestamp(s)) in {csv_path} -- need >= 2 distinct timestamps to estimate "
-                "native fps."
-            )
-        # slope of frame_number vs. wall_s == native camera fps; intercept is discarded (we only
-        # need frames-per-second, not this particular log's own start offset).
-        native_fps, _ = np.polyfit(wall_s, frame_number, deg=1)
+    t0 = datetime.fromisoformat(rows[0]["timestamp"])
+    wall_s = np.array([(datetime.fromisoformat(r["timestamp"]) - t0).total_seconds() for r in rows])
+    frame_number = np.array([int(r["frame_number"]) for r in rows], dtype=float)
+    if len(np.unique(wall_s)) < 2:
+        # np.polyfit needs >= 2 distinct wall-clock timestamps to fit a line's slope --
+        # with fewer, the least-squares design matrix is singular and numpy's LAPACK
+        # backend fails with an opaque "SVD did not converge" instead of a clear precondition
+        # error. Confirmed on 268 real clips, ALL with exactly 1 sensor-log row for the whole
+        # ~60s clip (a natix logging gap, not a code bug) -- raising here gives that a clear,
+        # categorizable status instead of an unrelated-looking numpy crash.
+        raise ValueError(
+            f"Only {len(rows)} sensor log row(s) ({len(np.unique(wall_s))} distinct "
+            f"timestamp(s)) in {csv_path} -- need >= 2 distinct timestamps to estimate "
+            "native fps."
+        )
+    # slope of frame_number vs. wall_s == native camera fps; intercept is discarded (we only
+    # need frames-per-second, not this particular log's own start offset).
+    native_fps, _ = np.polyfit(wall_s, frame_number, deg=1)
 
     elapsed, lats, lons, accs = [], [], [], []
     for row in rows:
         if row["GPS_latitude_deg"] == "na":
             continue
-        if has_frame_number:
-            t_s = (int(row["frame_number"]) - 1) / native_fps
-        else:
-            # No frame_number column (older/other log format) -- fall back to the CSV's own
-            # first-row timestamp, which is only correct if logging happened to start at the
-            # video's own first frame.
-            t_s = (datetime.fromisoformat(row["timestamp"]) - t0).total_seconds()
+        t_s = (int(row["frame_number"]) - 1) / native_fps
         elapsed.append(t_s)
         lats.append(float(row["GPS_latitude_deg"]))
         lons.append(float(row["GPS_longitude_deg"]))
