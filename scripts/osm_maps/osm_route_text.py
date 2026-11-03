@@ -23,6 +23,7 @@ VERSION = 1
 ROAD_MATCH_M = 8.0        # a path point is matched to roads within this distance
 HYSTERESIS_M = 2.0        # keep the previous road unless another one scores better by more than this
 LOOKAHEAD_M = 40.0        # events up to this far beyond the end of the path are reported (about one sight distance)
+NO_LIMIT_KMH = 140.0      # osm_bev.parse_speed_kmh turns maxspeed=none (no limit, e.g. German Autobahn) into this value
 MIN_MOVE_M = 2.0          # shorter paths = standing still
 # largest lateral distance (m) from the path at which an event is reported
 LATERAL_M = dict(stop=12.0, give_way=12.0, signals=10.0, crossing=3.0, calming=3.5, level_crossing=3.5,
@@ -86,9 +87,11 @@ def _match_roads(roads, xy, dirs):
 def _road_record(r, t0, t1):
     lanes = int(r["nl"]) or None
     speed = float(r["speed"]) if r["speed"] > 0 else None
+    no_limit = speed == NO_LIMIT_KMH
     return dict(t_start_s=t0, t_end_s=t1, osm_id=int(r["osm_id"]), road_class=r["cls"], one_way=bool(r["oneway"]),
                 tunnel=bool(r["tunnel"]), lanes=lanes, lanes_source=r["lsrc"] if lanes else None,
-                speed_limit_kmh=int(round(speed)) if speed else None, speed_limit_source=r["src"] if speed else None)
+                speed_limit_kmh=None if no_limit or not speed else int(round(speed)), no_speed_limit=no_limit,
+                speed_limit_source=r["src"] if speed else None)
 
 
 def _road_segments(matched, times):
@@ -227,7 +230,9 @@ def _road_phrase(s):
     if s["lanes"]:
         parts.append(f"{'probably ' if s['lanes_source'] == 'neighbour' else ''}{s['lanes']} "
                      f"lane{'s' if s['lanes'] > 1 else ''}")
-    if s["speed_limit_kmh"]:
+    if s["no_speed_limit"]:
+        parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}no speed limit")
+    elif s["speed_limit_kmh"]:
         parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}{s['speed_limit_kmh']} km/h limit")
     if s["tunnel"]:
         parts.append("in a tunnel")
