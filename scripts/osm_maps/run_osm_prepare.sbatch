@@ -24,6 +24,7 @@
 #   $OSM_DATA/_regions.json
 set -u
 REPO_DIR="${REPO_DIR:-/users/dbrggema/wm_trajectory_inference}"
+export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"   # `regions` imports vggt_slam.geofabrik; the image carries an older vggt_slam without it
 EXTRACTS="${EXTRACTS:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/trajectories/_osm_extracts}"
 OSM_DATA="${OSM_DATA:-/capstor/store/cscs/swissai/ab036/processed_datasets/natix/osm_bev/data}"
 PARALLEL="${PARALLEL:-10}"
