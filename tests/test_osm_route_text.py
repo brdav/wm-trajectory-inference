@@ -37,7 +37,7 @@ def test_road_attributes_and_sources():
             seg["speed_limit_source"]) == ("primary", 2, "map", 50, "inferred")
     assert d["maneuver"]["kind"] == "straight" and d["moving"]
     cap = rt.caption(d)
-    assert "primary road, 2 lanes, likely 50 km/h limit" in cap and "goes straight" in cap
+    assert "primary road, 2 lanes, likely 30 mph limit" in cap and "goes straight" in cap
 
 
 def test_maxspeed_none_is_no_explicit_speed_limit():
@@ -175,6 +175,13 @@ def test_roundabout_needs_the_tag_and_counts_its_exits():
     arms = [_way([(0, -30), (0, 18)], 11), _way([(0, 42), (0, 100)], 12), _way([(12, 30), (60, 30)], 13)]
     assert all(e["type"] != "roundabout" for e in _events([ring] + arms, set()))          # untagged: not a roundabout
     ev = _events([ring] + arms, {10})
-    assert [e["type"] for e in ev] == ["roundabout"] and ev[0]["exits"] == 3
+    assert [e["type"] for e in ev] == ["roundabout"] and ev[0]["connected_ways"] == 3
     assert abs(ev[0]["dist_from_start_m"] - 18.0) < 1.5
-    assert rt._event_phrase(ev[0]).endswith("a roundabout with 3 exits")
+    assert rt._event_phrase(ev[0]).endswith("a roundabout")
+
+
+def test_speed_limits_read_in_mph_where_signs_do():
+    main = road([(0, -30), (0, 100)], cls="primary", speed=112.65, src="map")           # OSM "70 mph", stored as km/h
+    d = rt.describe_route(scene([main]), north(), TIMES)
+    assert "113 km/h limit" in rt.caption(dict(d, location=dict(d["location"], country="Switzerland")))
+    assert "70 mph limit" in rt.caption(dict(d, location=dict(d["location"], country="United Kingdom")))

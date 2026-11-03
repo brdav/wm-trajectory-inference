@@ -87,7 +87,7 @@ def _line_ends(g):
 
 def _junctions(roads, roundabout_ids):
     """Topology of the scene's vehicle roads (service roads left out: driveways and parking aisles are no intersections).
-    -> (intersections [(centre Point, arms)], roundabouts [(way id, ring geometry, exits or None)]).
+    -> (intersections [(centre Point, arms)], roundabouts [(way id, ring geometry, connected ways or None)]).
     A road pair meets where their lines share a point on the same layer (OSM connects roads by shared nodes; a bridge sits on
     another layer). Arms at a junction: each road end there counts 1, a road passing through counts 2. Two roads
     ending at one point (a continuation) have 2 arms and are no intersection. Ways tagged junction=roundabout are reported
@@ -318,7 +318,7 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
             hit = shapely.get_coordinates(ring.intersection(ext.buffer(LATERAL_M["roundabout"])))
             if len(hit):                                                  # where the path first comes within reach of the ring
                 first = min(hit, key=lambda c: ext.project(shapely.Point(*c)))
-                add("roundabout", "", shapely.Point(*first), None, way_id, exits=exits)
+                add("roundabout", "", shapely.Point(*first), None, way_id, connected_ways=exits)
         events.sort(key=lambda e: e["dist_from_start_m"])
         kept = []
         for e in events:                                                  # one crossing drawn as node + way = one event
@@ -352,7 +352,16 @@ CROSSING_NAMES = {"signals": "a signalised pedestrian crossing", "marked": "a ma
                   "other": "a pedestrian crossing"}
 
 
-def _road_phrase(s):
+MPH_COUNTRIES = {"United Kingdom", "United States", "Puerto Rico"}   # signs read mph; OSM values were converted to km/h
+
+
+def _speed_phrase(kmh, country):
+    if country in MPH_COUNTRIES:
+        return f"{5 * round(kmh / 1.609344 / 5)} mph"
+    return f"{kmh} km/h"
+
+
+def _road_phrase(s, country=None):
     parts = [("one-way " if s["one_way"] else "") + ROAD_NAMES.get(s["road_class"], "road")]
     if s["lanes"]:
         parts.append(f"{'probably ' if s['lanes_source'] == 'neighbour' else ''}{s['lanes']} "
@@ -360,7 +369,8 @@ def _road_phrase(s):
     if s["no_explicit_speed_limit"]:
         parts.append("no explicit speed limit" + (" (also on the adjoining road)" if s["speed_limit_source"] == "inferred" else ""))
     elif s["speed_limit_kmh"]:
-        parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}{s['speed_limit_kmh']} km/h limit")
+        parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}"
+                     f"{_speed_phrase(s['speed_limit_kmh'], country)} limit")
     if s["tunnel"]:
         parts.append("in a tunnel")
     return ", ".join(parts)
@@ -380,7 +390,7 @@ def _event_phrase(e):
     if e["type"] == "intersection":
         name = f"a {e['arms']}-way intersection"
     elif e["type"] == "roundabout":
-        name = "a roundabout" + (f" with {e['exits']} exits" if e["exits"] else "")
+        name = "a roundabout"        # connected_ways stays in the JSON only: entry and exit lanes are separate ways, so it is no exit count
     elif e["type"] == "crossing":
         name = CROSSING_NAMES.get(e["subtype"], "a pedestrian crossing")
     else:
@@ -405,6 +415,7 @@ def _location_phrase(loc):
 def caption(d):
     """One short paragraph from a describe_route dict."""
     m, out = d["maneuver"], []
+    country = (d.get("location") or {}).get("country")
     loc = _location_phrase(d.get("location"))
     if loc:
         out.append(f"Location: {loc}.")
@@ -412,11 +423,11 @@ def caption(d):
         out.append("No mapped road near the path.")
     else:
         first = d["roads"][0]
-        out.append(("The ego vehicle is on a " if d["moving"] else "The ego vehicle is standing on a ") + _road_phrase(first) + ".")
+        out.append(("The ego vehicle is on a " if d["moving"] else "The ego vehicle is standing on a ") + _road_phrase(first, country) + ".")
         for s in d["roads"][1:]:
             if s["t_end_s"] - s["t_start_s"] >= 0.5 or s is d["roads"][-1]:
                 out.append(f"{_where(s['dist_start_m'], 'After about')[0].upper()}{_where(s['dist_start_m'], 'After about')[1:]} "
-                           f"it is on a {_road_phrase(s)}.")
+                           f"it is on a {_road_phrase(s, country)}.")
     if d["moving"]:
         out.append(f"The path is about {_approx_m(d['path_length_m'])} long.")
     if m["kind"] == "straight":
