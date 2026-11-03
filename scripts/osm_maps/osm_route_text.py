@@ -424,8 +424,13 @@ def caption(d):
     else:
         first = d["roads"][0]
         out.append(("The ego vehicle is on a " if d["moving"] else "The ego vehicle is standing on a ") + _road_phrase(first, country) + ".")
+        shown = _road_phrase(first, country)
         for s in d["roads"][1:]:
+            phrase = _road_phrase(s, country)
+            if phrase == shown:
+                continue                                  # another way with the same description: nothing new to say
             if s["t_end_s"] - s["t_start_s"] >= 0.5 or s is d["roads"][-1]:
+                shown = phrase
                 out.append(f"{_where(s['dist_start_m'], 'After about')[0].upper()}{_where(s['dist_start_m'], 'After about')[1:]} "
                            f"it is on a {_road_phrase(s, country)}.")
     if d["moving"]:

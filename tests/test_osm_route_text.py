@@ -185,3 +185,10 @@ def test_speed_limits_read_in_mph_where_signs_do():
     d = rt.describe_route(scene([main]), north(), TIMES)
     assert "113 km/h limit" in rt.caption(dict(d, location=dict(d["location"], country="Switzerland")))
     assert "70 mph limit" in rt.caption(dict(d, location=dict(d["location"], country="United Kingdom")))
+
+
+def test_consecutive_ways_with_the_same_description_are_mentioned_once():
+    a = road([(0, -30), (0, 20)], osm_id=1, cls="primary", nl=2, speed=50.0, src="map")
+    b = road([(0, 20), (0, 100)], osm_id=2, cls="primary", nl=2, speed=50.0, src="map")
+    d = rt.describe_route(scene([a, b]), north(), TIMES)
+    assert len(d["roads"]) == 2 and "After about" not in rt.caption(d)
