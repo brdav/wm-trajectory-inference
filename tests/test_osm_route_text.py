@@ -157,6 +157,7 @@ def test_crossroads_is_an_intersection_but_one_joining_side_road_is_not():
     (e,) = _events([main, _way([(0, 20), (40, 20)], 3)])           # one side road ends on the road: it joins from the right
     assert (e["type"], e["side"], e["arms"]) == ("side_road", "right", 3)
     assert rt._event_phrase(e).endswith("a side road joining on the right")
+    assert "a side road joining on the right." in rt.caption(rt.describe_route(scene([main, _way([(0, 20), (40, 20)], 3)]), north(), TIMES))
     (e,) = _events([main, _way([(0, 20), (-40, 20)], 3)])
     assert (e["type"], e["side"]) == ("side_road", "left")
     two = _events([main, _way([(0, 20), (40, 20)], 3), _way([(0, 20), (-40, 20)], 4)])      # one each side = crossroads

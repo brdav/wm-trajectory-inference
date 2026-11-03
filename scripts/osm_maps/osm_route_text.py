@@ -421,7 +421,7 @@ def _road_phrase(s, country=None):
     return ", ".join(parts)
 
 
-NO_SIDE = {"intersection", "t_junction", "fork", "roundabout"}
+NO_SIDE = {"intersection", "side_road", "t_junction", "fork", "roundabout"}   # on the path, or the side is in the phrase
 
 
 def _approx_m(d):
