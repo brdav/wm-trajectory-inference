@@ -140,23 +140,41 @@ def _way(coords, osm_id, cls="residential", layer=0):
     return r
 
 
-def _events(roads, ids=None, kinds=("intersection", "roundabout")):
+JUNCTIONS = ("intersection", "side_road", "t_junction", "fork", "roundabout")
+
+
+def _events(roads, ids=None, kinds=JUNCTIONS):
     d = rt.describe_route(scene(roads), north(), TIMES, None, ids)
     return [e for e in d["events"] if e["type"] in kinds]
 
 
-def test_four_way_intersection_of_two_through_roads_and_a_t_junction():
+def test_crossroads_is_an_intersection_but_one_joining_side_road_is_not():
     main = _way([(0, -30), (0, 20), (0, 100)], 1)                  # passes through the shared node at (0, 20)
     cross = _way([(-50, 20), (0, 20), (50, 20)], 2)
     (e,) = _events([main, cross])
     assert e["type"] == "intersection" and e["arms"] == 4 and abs(e["dist_from_start_m"] - 20.0) < 1.0
     assert "a 4-way intersection" in rt._event_phrase(e)
-    side = _way([(0, 20), (40, 20)], 3)                            # a side road that ends on the main road: 2 + 1 arms
-    (e,) = _events([main, side])
-    assert e["arms"] == 3
+    (e,) = _events([main, _way([(0, 20), (40, 20)], 3)])           # one side road ends on the road: it joins from the right
+    assert (e["type"], e["side"], e["arms"]) == ("side_road", "right", 3)
+    assert rt._event_phrase(e).endswith("a side road joining on the right")
+    (e,) = _events([main, _way([(0, 20), (-40, 20)], 3)])
+    assert (e["type"], e["side"]) == ("side_road", "left")
+    two = _events([main, _way([(0, 20), (40, 20)], 3), _way([(0, 20), (-40, 20)], 4)])      # one each side = crossroads
+    assert [(e["type"], e["arms"]) for e in two] == [("intersection", 4)]
+    assert "a 4-way intersection." in rt.caption(rt.describe_route(scene([main, cross]), north(), TIMES))     # no side
 
 
-def test_no_intersection_for_continuations_service_roads_bridges_or_junctions_behind_the_start():
+def test_t_junction_where_the_driven_road_ends_and_a_fork():
+    ends = _way([(0, -30), (0, 20)], 1)
+    top = _way([(-50, 20), (0, 20), (50, 20)], 2)
+    (e,) = _events([ends, top])
+    assert (e["type"], e["arms"]) == ("t_junction", 3) and "the road ends" in rt._event_phrase(e)
+    (e,) = _events([_way([(0, -30), (0, 20)], 1), _way([(0, 20), (-12, 60)], 2), _way([(0, 20), (12, 60)], 3)])
+    assert e["type"] == "fork"
+    assert _events([_way([(0, -30), (0, 20)], 1), _way([(0, 20), (-40, 20)], 2)]) == []    # a bend: two arms
+
+
+def test_no_junction_for_continuations_service_roads_bridges_or_junctions_behind_the_start():
     a, b = _way([(0, -30), (0, 20)], 1), _way([(0, 20), (0, 100)], 2)             # two ways end to end: 2 arms
     assert _events([a, b]) == []
     main = _way([(0, -30), (0, 100)], 1)

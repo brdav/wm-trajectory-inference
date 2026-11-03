@@ -27,12 +27,14 @@ NO_LIMIT_KMH = 140.0      # osm_bev.parse_speed_kmh turns maxspeed=none (no limi
 MIN_MOVE_M = 2.0          # shorter paths = standing still
 # largest lateral distance (m) from the path at which an event is reported
 LATERAL_M = dict(stop=12.0, give_way=12.0, signals=10.0, crossing=3.0, calming=3.5, level_crossing=3.5,
-                 mini_roundabout=3.5, bus_stop=12.0, intersection=6.0, roundabout=6.0)
+                 mini_roundabout=3.5, bus_stop=12.0, intersection=6.0, side_road=6.0, t_junction=6.0, fork=6.0, roundabout=6.0)
 UNKNOWN_FACING_LATERAL_M = 3.0   # stop / give way without a mapped direction: only if the node lies on the driven road
 DEDUPE_M = dict(default=8.0, roundabout=40.0)   # events of one type closer than this along the path are one event
 JUNCTION_CLUSTER_M = 3.0         # crossing points of road pairs closer than this belong to one junction
 JUNCTION_TOUCH_M = 1.5           # a road counts as meeting a junction if it passes / ends within this of its centre
-MIN_ARMS = 3                     # arms (road ends at the junction, a through road = 2) needed for an intersection
+MIN_ARMS = 3                     # arms (road ends at the junction, a through road = 2) needed for a junction
+ARM_LOOK_M = 8.0                 # an arm's direction is taken this far from the junction centre
+AHEAD_DEG = 30.0                 # arms within this of the travel direction are "ahead" (or "behind" when opposite)
 
 
 class PlaceIndex:
@@ -81,17 +83,59 @@ def load_roundabout_ids(path):
     return set(pq.read_table(path)["osm_id"].to_pylist())
 
 
-def _line_ends(g):
-    return [c for part in shapely.get_parts(g) for c in (part.coords[0], part.coords[-1])]
+def _arm_vectors(g, centre):
+    """Unit vectors from the junction centre along each arm of way geometry `g` that meets it: a road end there is one arm,
+    a road passing through is two."""
+    near = lambda c: np.hypot(c[0] - centre.x, c[1] - centre.y) <= JUNCTION_TOUCH_M
+    out = []
+    for part in shapely.get_parts(g):
+        for c, ahead in ((part.coords[0], True), (part.coords[-1], False)):
+            if near(c):
+                q = part.interpolate(min(ARM_LOOK_M, part.length) if ahead else max(part.length - ARM_LOOK_M, 0.0))
+                out.append(_unit(np.array([q.x - centre.x, q.y - centre.y])))
+    if not out:
+        s = g.project(centre)
+        for t in (max(s - ARM_LOOK_M, 0.0), min(s + ARM_LOOK_M, g.length)):
+            q = g.interpolate(t)
+            out.append(_unit(np.array([q.x - centre.x, q.y - centre.y])))
+    return out
+
+
+def _classify_junction(vectors, fwd):
+    """Junction type seen from the direction of travel `fwd`, from the arms' directions:
+    side_road (the road goes on, one road joins on a side), intersection (the road goes on, roads leave on both sides or twice
+    on one), t_junction (the road ends, roads go left and right), fork (the road splits ahead); None for a merge or a bend.
+    -> (kind, side or None)."""
+    ahead = behind = left = right = 0
+    for v in vectors:
+        th = math.degrees(math.atan2(fwd[0] * v[1] - fwd[1] * v[0], float(np.dot(fwd, v))))     # + = left of travel
+        if abs(th) < AHEAD_DEG:
+            ahead += 1
+        elif abs(th) > 180.0 - AHEAD_DEG:
+            behind += 1
+        elif th > 0:
+            left += 1
+        else:
+            right += 1
+    sides = left + right
+    if ahead >= 2 and sides == 0:
+        return "fork", None
+    if ahead and sides == 1:
+        return "side_road", "left" if left else "right"
+    if ahead and sides >= 2:
+        return "intersection", None
+    if not ahead and left and right:
+        return "t_junction", None
+    return None, None
 
 
 def _junctions(roads, roundabout_ids):
     """Topology of the scene's vehicle roads (service roads left out: driveways and parking aisles are no intersections).
-    -> (intersections [(centre Point, arms)], roundabouts [(way id, ring geometry, connected ways or None)]).
+    -> (junctions [(centre Point, arm vectors)], roundabouts [(way id, ring geometry, connected ways or None)]).
     A road pair meets where their lines share a point on the same layer (OSM connects roads by shared nodes; a bridge sits on
     another layer). Arms at a junction: each road end there counts 1, a road passing through counts 2. Two roads
     ending at one point (a continuation) have 2 arms and are no intersection. Ways tagged junction=roundabout are reported
-    as roundabouts, never as intersections."""
+    as roundabouts, never as junctions."""
     by = {}
     for r in roads:
         if r["cls"] not in NON_VEHICLE and r["cls"] != "service":
@@ -130,14 +174,12 @@ def _junctions(roads, roundabout_ids):
     inter = []
     for c in clusters:
         centre = shapely.Point(*np.mean(c, axis=0))
-        arms = 0
+        vectors = []
         for i in ids:
-            if i in ring_ids or ways[i]["g"].distance(centre) > JUNCTION_TOUCH_M:
-                continue
-            ends = sum(1 for e in _line_ends(ways[i]["g"]) if np.hypot(e[0] - centre.x, e[1] - centre.y) <= JUNCTION_TOUCH_M)
-            arms += ends or 2
-        if arms >= MIN_ARMS:
-            inter.append((centre, arms))
+            if i not in ring_ids and ways[i]["g"].distance(centre) <= JUNCTION_TOUCH_M:
+                vectors += _arm_vectors(ways[i]["g"], centre)
+        if len(vectors) >= MIN_ARMS:
+            inter.append((centre, vectors))
     rounds = []
     for i in ring_ids:
         g = ways[i]["g"]
@@ -271,7 +313,7 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
         tree = STRtree([p for p, _ in veh]) if veh else None
         half = max(abs(xy).max() + LOOKAHEAD_M, 1.0)
 
-        def add(kind, sub, pt, direction_known, node_id, **extra):
+        def add(kind, sub, pt, direction_known, node_id, side=None, **extra):
             s = float(ext.project(pt))
             q = np.array(ext.interpolate(s).coords[0])
             tan = _tangent(ext, s)
@@ -285,7 +327,7 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
             events.append(dict(
                 type=kind, subtype=sub or None, t_s=None if beyond else round(float(np.interp(s, cum, times - times[0])), 2),
                 dist_from_start_m=round(s, 1), beyond_path=beyond, ahead_of_end_m=round(s - length, 1) if beyond else None,
-                side="left" if tan[0] * v[1] - tan[1] * v[0] > 0 else "right", lateral_m=round(lat, 1),
+                side=side or ("left" if tan[0] * v[1] - tan[1] * v[0] > 0 else "right"), lateral_m=round(lat, 1),
                 direction_known=direction_known, osm_id=node_id, **extra))
 
         for n in scene["nodes"]:
@@ -312,8 +354,10 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
                 add("crossing", r["sub"], shapely.Point(*np.array(hit.representative_point().coords[0])), None,
                     int(r["osm_id"]))
         inter, rounds = _junctions(roads, roundabout_ids or set())
-        for centre, arms in inter:
-            add("intersection", "", centre, None, None, arms=arms)
+        for centre, vectors in inter:
+            kind, side = _classify_junction(vectors, _tangent(ext, float(ext.project(centre))))
+            if kind:
+                add(kind, "", centre, None, None, side=side, arms=len(vectors))
         for way_id, ring, exits in rounds:
             hit = shapely.get_coordinates(ring.intersection(ext.buffer(LATERAL_M["roundabout"])))
             if len(hit):                                                  # where the path first comes within reach of the ring
@@ -323,7 +367,8 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
         kept = []
         for e in events:                                                  # one crossing drawn as node + way = one event
             if not any(k["type"] == e["type"] and abs(k["dist_from_start_m"] - e["dist_from_start_m"])
-                       < DEDUPE_M.get(e["type"], DEDUPE_M["default"]) for k in kept):
+                       < DEDUPE_M.get(e["type"], DEDUPE_M["default"]) and (e["type"] != "side_road" or k["side"] == e["side"])
+                       for k in kept):
                 kept.append(e)
         events = kept
 
@@ -376,6 +421,9 @@ def _road_phrase(s, country=None):
     return ", ".join(parts)
 
 
+NO_SIDE = {"intersection", "t_junction", "fork", "roundabout"}
+
+
 def _approx_m(d):
     """Distance along the path as a rounded phrase: 'at the start' below 3 m, else the nearest 5 m."""
     return None if d < 3.0 else f"{max(5, int(5 * round(d / 5.0)))} m"
@@ -389,6 +437,12 @@ def _where(d, lead):
 def _event_phrase(e):
     if e["type"] == "intersection":
         name = f"a {e['arms']}-way intersection"
+    elif e["type"] == "side_road":
+        name = f"a side road joining on the {e['side']}"
+    elif e["type"] == "t_junction":
+        name = "a T-junction where the road ends"
+    elif e["type"] == "fork":
+        name = "a fork in the road"
     elif e["type"] == "roundabout":
         name = "a roundabout"        # connected_ways stays in the JSON only: entry and exit lanes are separate ways, so it is no exit count
     elif e["type"] == "crossing":
@@ -445,5 +499,6 @@ def caption(d):
         out.append(f"It makes a U-turn to the {m['direction']}.")
     for e in d["events"]:
         phrase = _event_phrase(e)
-        out.append(f"{phrase[0].upper()}{phrase[1:]} ({e['side']}).")
+        side = "" if e["type"] in NO_SIDE else f" ({e['side']})"      # a junction on the path has no side
+        out.append(f"{phrase[0].upper()}{phrase[1:]}{side}.")
     return " ".join(out)
