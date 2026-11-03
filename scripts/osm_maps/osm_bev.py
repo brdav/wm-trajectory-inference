@@ -66,7 +66,7 @@ COUNTRIES = {
     "Slovenia": "europe/slovenia", "Spain": "europe/spain", "Sweden": "europe/sweden",
     "Switzerland": "europe/switzerland", "United States": "north-america/us",
 }
-LEFT_HAND_TRAFFIC = {"Ireland", "Japan"}   # everyone else in the list drives on the right
+LEFT_HAND_TRAFFIC = {"Ireland", "Japan", "United Kingdom"}   # everyone else in the list drives on the right
 
 
 def region_dir(key: str) -> str:

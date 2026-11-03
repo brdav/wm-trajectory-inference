@@ -125,7 +125,7 @@ def test_location_line_and_ego_vehicle_wording(tmp_path):
     assert d["location"] == dict(country="United States", state="Nevada", place="Reno", place_kind="city",
                                  place_distance_km=0.0, within_place=True)
     cap = rt.caption(d)
-    assert cap.startswith("Location: Reno, Nevada, United States. The ego vehicle is on a residential street")
+    assert cap.startswith("Location: Reno, Nevada, United States. Traffic drives on the right. The ego vehicle is on a residential street")
     assert "The car" not in cap
     assert places.nearest(0.0, 0.02)["within"] is True and places.nearest(0.0, 0.2)["within"] is False   # 22 km from Reno: "near"
     assert places.nearest(40.0, 40.0) is None                                                           # nothing within 3 radii
@@ -256,3 +256,12 @@ def test_side_is_only_given_for_controls_clearly_beside_the_path():
     cap = rt.caption(d)
     assert "At about 20 m: possibly traffic lights." in cap and "At about 40 m: possibly traffic lights (right)." in cap
     assert "pedestrian crossing." in cap and "level crossing." in cap
+
+
+def test_drive_side_is_stated_and_the_uk_drives_on_the_left():
+    import osm_bev
+    assert [osm_bev.drive_side(c) for c in ("United Kingdom", "Japan", "Ireland", "Switzerland", "United States_Nevada")] == \
+        ["left", "left", "left", "right", "right"]
+    main = road([(0, -30), (0, 100)])
+    d = rt.describe_route(dict(scene([main]), side="left"), north(), TIMES)
+    assert d["drive_side"] == "left" and "Traffic drives on the left." in rt.caption(d)

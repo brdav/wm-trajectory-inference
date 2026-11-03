@@ -33,7 +33,7 @@ MIN_MOVE_M = 2.0          # shorter paths = standing still
 LATERAL_M = dict(stop=12.0, give_way=12.0, signals=10.0, crossing=3.0, calming=3.5, level_crossing=3.5,
                  mini_roundabout=3.5, bus_stop=12.0, intersection=6.0, side_road=6.0, t_junction=6.0, fork=6.0, roundabout=6.0)
 UNKNOWN_FACING_LATERAL_M = 3.0   # stop / give way without a mapped direction: only if the node lies on the driven road
-DEDUPE_M = dict(default=8.0, roundabout=40.0)   # events of one type closer than this along the path are one event
+DEDUPE_M = dict(default=8.0, roundabout=40.0, intersection=15.0, t_junction=15.0, fork=15.0)   # events of one type closer than this along the path are one event
 JUNCTION_CLUSTER_M = 3.0         # crossing points of road pairs closer than this belong to one junction
 JUNCTION_TOUCH_M = 1.5           # a road counts as meeting a junction if it passes / ends within this of its centre
 MIN_ARMS = 3                     # arms (road ends at the junction, a through road = 2) needed for a junction
@@ -530,6 +530,8 @@ def caption(d):
     loc = _location_phrase(d.get("location"))
     if loc:
         out.append(f"Location: {loc}.")
+    if d.get("drive_side"):
+        out.append(f"Traffic drives on the {d['drive_side']}.")
     if not d["roads"]:
         out.append("No mapped road near the path.")
     else:
