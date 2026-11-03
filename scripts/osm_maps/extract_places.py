@@ -13,6 +13,7 @@ The place name is the first of name:en, int_name, name:ja-Latn, name:ja_rm, name
 when OSM has one). Other place kinds (hamlet, suburb, ...) are not kept: the point is "which town is this", not a gazetteer.
 """
 import argparse
+import multiprocessing as mp
 from pathlib import Path
 
 KINDS = ("city", "town", "village")
@@ -50,17 +51,18 @@ def main():
     ap.add_argument("--extracts", required=True, help="folder with <region>.osm.pbf files")
     ap.add_argument("--out-dir", required=True, help="where _places.parquet and _roundabout_ways.parquet are written")
     ap.add_argument("--regions", nargs="*", help="file stems to read (default: all)")
+    ap.add_argument("--workers", type=int, default=1, help="extracts read in parallel")
     a = ap.parse_args()
 
     pbfs = sorted(Path(a.extracts).glob("*.osm.pbf"))
     if a.regions:
         pbfs = [p for p in pbfs if p.name.removesuffix(".osm.pbf") in set(a.regions)]
     places, roundabouts = [], []
-    for p in pbfs:
-        pl, ra = read_pbf(p)
-        print(f"{p.name}: {len(pl)} places, {len(ra)} roundabout ways", flush=True)
-        places += pl
-        roundabouts += ra
+    with mp.Pool(a.workers) as pool:
+        for p, (pl, ra) in zip(pbfs, pool.imap(read_pbf, pbfs)):
+            print(f"{p.name}: {len(pl)} places, {len(ra)} roundabout ways", flush=True)
+            places += pl
+            roundabouts += ra
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     cols = ("name", "kind", "lat", "lon", "population")

@@ -1383,11 +1383,12 @@ class MapRenderer:
             cv.fill_xy([h * L, -h * L * 0.7 + n * W, -h * L * 0.25, -h * L * 0.7 - n * W], col)
 
     def render(self, lat, lon, heading_deg=0.0, country=None, ego=False, oneway_arrows=True, trajectory=None,
-               ego_scale=None):
+               ego_scale=None, scene_only=False):
         """Render the ego-centred crop at (lat, lon) heading `heading_deg` (compass, clockwise from north).
         trajectory: dict(lonlat=(N, 2) array, ticks=[indices]) of the future ego path to draw on top.
         Returns dict(image=RGB array, meta=..., scene=...); `scene` is the classified, local-frame feature set the image was
-        drawn from (roads with inferred lanes / speeds, nodes, crossing ways), for osm_route_text.py."""
+        drawn from (roads with inferred lanes / speeds, nodes, crossing ways), for osm_route_text.py. scene_only=True skips the
+        drawing (image=None): the scene is the same, several times faster."""
         import shapely
 
         countries, centre_region = self._regions_near(lat, lon, country)
@@ -1403,6 +1404,18 @@ class MapRenderer:
         areas, roads, crossings_way, rails, nodes = self._group_rows(rows)
         levels = self._prepare_roads(roads)
 
+        def result(image):
+            return dict(image=image, meta=dict(
+                lat=lat, lon=lon, heading_deg=heading_deg, heading_up=self.heading_up, country=country,
+                countries_with_data=found, drive_side=side, meters_per_px=self.res, px=self.px,
+                half_extent_m=self.half, n_features=len(rows)),
+                scene=dict(roads=roads, nodes=nodes, crossings_way=crossings_way, to_local=to_local, side=side,
+                           region=country))
+
+        if scene_only:
+            infer_road_speeds(roads)                    # what _draw_speed_labels does to the roads before drawing
+            return result(None)
+
         cv = Canvas(self.px, self.res, self.ss, BG)
         self._draw_base(cv, areas, roads, rails, levels)
         if oneway_arrows:
@@ -1416,12 +1429,7 @@ class MapRenderer:
         if ego:
             self._draw_ego(cv, heading_deg, trajectory is not None, ego_scale)
 
-        return dict(image=cv.result(), meta=dict(
-            lat=lat, lon=lon, heading_deg=heading_deg, heading_up=self.heading_up, country=country,
-            countries_with_data=found, drive_side=side, meters_per_px=self.res, px=self.px,
-            half_extent_m=self.half, n_features=len(rows)),
-            scene=dict(roads=roads, nodes=nodes, crossings_way=crossings_way, to_local=to_local, side=side,
-                       region=country))
+        return result(cv.result())
 
 
 # --------------------------------------------------------------------------------------

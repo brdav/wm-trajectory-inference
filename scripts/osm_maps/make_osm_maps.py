@@ -278,13 +278,14 @@ def process_clip(row, samples, a, files, texts):
         if option != "none" and length >= 2.0:                   # a standing car has no direction to draw
             traj = dict(lonlat=ll, ticks=[k for k in range(TICKS_PER_S, len(path), TICKS_PER_S)])
         ego_scale = 1.0 if option == "none" else 0.5
-        o = mr.render(lat0, lon0, heading, None, ego=True, trajectory=traj, ego_scale=ego_scale)
+        o = mr.render(lat0, lon0, heading, None, ego=True, trajectory=traj, ego_scale=ego_scale, scene_only=a["text_only"])
         if o["meta"]["n_features"] == 0:
             skipped["no_map_data"] += 1
             continue
-        img = np.ascontiguousarray(o["image"][:, :, ::-1])
-        files.append((name + a["ext"], _encode(img, a)))
-        if (a["save_mask"] or a["save_map_only"]) and traj is not None:
+        if not a["text_only"]:
+            img = np.ascontiguousarray(o["image"][:, :, ::-1])
+            files.append((name + a["ext"], _encode(img, a)))
+        if not a["text_only"] and (a["save_mask"] or a["save_map_only"]) and traj is not None:
             base = np.ascontiguousarray(
                 mr.render(lat0, lon0, heading, None, ego=True, trajectory=None, ego_scale=ego_scale)["image"][:, :, ::-1])
             if a["save_map_only"]:
@@ -329,7 +330,7 @@ def process_session(job):
         records += r
         unplottable += u
         skipped.update(sk)
-    if files:
+    if files or texts:
         zp = Path(a["out"]) / (session_rel + ".zip")
         zp.parent.mkdir(parents=True, exist_ok=True)
         part = zp.with_name(zp.name + ".part")
@@ -373,6 +374,8 @@ def main():
                                      "(default: <osm-data>/_places.parquet if it exists)")
     ap.add_argument("--roundabouts", help="roundabout way ids of extract_places.py for the route text "
                                           "(default: <osm-data>/_roundabout_ways.parquet if it exists)")
+    ap.add_argument("--text-only", action="store_true", help="write only the route text (text.jsonl in every zip, caption in the "
+                                                             "index), no images: for datasets whose maps already exist")
     ap.add_argument("--no-text", action="store_true", help="skip the route descriptions (text.jsonl in every zip, caption in the index)")
     ap.add_argument("--save-mask", action="store_true", help="also write the path layer as *_path.png (binary mask)")
     ap.add_argument("--save-map-only", action="store_true", help="also write the view without the path as *_map.png")
@@ -381,6 +384,8 @@ def main():
     ap.add_argument("--shard", default="0/1", help="i/N: process only sessions with hash(session) %% N == i (Slurm array)")
     ap.add_argument("--overwrite", action="store_true", help="redo sessions that are already in done_sessions*.txt")
     a = ap.parse_args()
+    if a.text_only and a.no_text:
+        ap.error("--text-only and --no-text exclude each other")
 
     rows = [json.loads(l) for m in a.manifest for l in open(m)]
     rows = [r for r in rows if r.get("pose_source") in ("fused", "synthetic")]
@@ -415,7 +420,8 @@ def main():
     args = dict(path=a.path, out=a.out, dataset_root=a.dataset_root, traj_root=a.traj_root, horizon=a.horizon,
                 ext=".webp" if a.format == "webp" else ".png", png_level=a.png_level,
                 gate_mean=a.max_snippet_error_m, gate_max=a.max_snippet_max_error_m, max_per_clip=a.max_per_clip,
-                save_mask=a.save_mask, save_map_only=a.save_map_only, text=not a.no_text)
+                save_mask=a.save_mask, save_map_only=a.save_map_only, text=not a.no_text or a.text_only,
+                text_only=a.text_only)
     # session jobs: all selected clips of one session together (one zip per session)
     by_session = collections.defaultdict(list)
     for r in rows:

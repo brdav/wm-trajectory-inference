@@ -17,6 +17,8 @@
 #   N_SHARDS=8 sbatch --array=0-7 scripts/osm_maps/run_osm_maps.sbatch
 #   COUNTRIES="Switzerland" LIMIT_CLIPS=200 sbatch ...    # small test first
 #   PATH_KIND=map_matched sbatch scripts/osm_maps/run_osm_maps.sbatch   # same samples with the map-matched path -> maps_map_matched/
+#   TEXT_ONLY=1 OUT=<dir>/text_predicted sbatch ...          # route text only, for a dataset whose images exist already
+#   For another dataset set DATASET_ROOT, TRAJ_ROOT, SAMPLE_MANIFEST, OSM_DATA and OUT (and sbatch --output).
 #
 # Resumable: a session listed in done_sessions.shard<i>of<N>.txt is skipped, so after a timeout or crash just submit the SAME
 # command again (same N_SHARDS). Measured only on a few hundred Swiss clips: ~80 images/s on 64 workers, i.e. roughly an
@@ -36,6 +38,7 @@ SHARD="${SLURM_ARRAY_TASK_ID:-0}"
 EXTRA=()
 [ -n "${COUNTRIES:-}" ] && EXTRA+=(--countries $COUNTRIES)
 [ -n "${LIMIT_CLIPS:-}" ] && EXTRA+=(--limit-clips "$LIMIT_CLIPS")
+[ -n "${TEXT_ONLY:-}" ] && EXTRA+=(--text-only)     # only the route text, no images (OUT then needs its own folder, e.g. text_predicted)
 
 CMD=(python3 -u "$REPO_DIR/scripts/osm_maps/make_osm_maps.py" --osm-data "$OSM_DATA" --out "$OUT" --path "$PATH_KIND"
      --format "$FORMAT" --workers "$WORKERS" --shard "$SHARD/$N_SHARDS" "${EXTRA[@]}")
