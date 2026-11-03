@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Write ego-centred OSM map images with the ego's next-5-seconds path, for clips with a fused trajectory.
 
-For every clip with `pose_source == "fused"` in trajectories/manifest.jsonl (GPS/road-fused, QC-passed) and for every
-row of the sample manifest of that clip (processed_datasets/natix/manifest/samples_24fps.parquet; one row = one 5 s
-training sample), let t0 be the row's start frame (`start_s`, on the video's clock). The map (scripts/osm_maps/osm_bev.py)
+For every clip with `pose_source == "fused"` (GPS/road-fused, QC-passed) or `"synthetic"` (the synthetic dataset) in
+trajectories/manifest.jsonl and for every row of the sample manifest of that clip
+(processed_datasets/natix/manifest/samples_24fps.parquet; one row = one 5 s training sample), let t0 be the row's start
+frame (`start_s`, on the video's clock). The map (scripts/osm_maps/osm_bev.py)
 is rendered centred on the car at t0, rotated heading-up, with the car's path over [t0, t0 + horizon] drawn on top.
 The path comes from one of three sources (--path):
 
@@ -28,7 +29,7 @@ Output: ONE ZIP PER SESSION, --out/<Country>/[<State>/]<date>/<session>.zip (the
 sessions: ~45k files for the whole dataset instead of ~1.3M). A zip is stored (images are not recompressed) and holds
 <HH-MM-SS>_s<sample_index>.<png|webp> plus index.jsonl, unplottable.jsonl and text.jsonl for that session; optional --save-mask
 (path layer, *_path.png) and --save-map-only (view without the path, *_map.png). The image of a sample row is therefore
-entry <time>_s<sample_index>.<ext> of <session>.zip (both from source_video_path / sample_index).
+entry <time>_s<sample_index>.<ext> of <session>.zip (both from source_video_path, or source_clip_path in the synthetic manifest, and sample_index).
 At the top of --out: index*.jsonl (one line per image: sample_id, start_frame, t0, lat/lon, heading, region, path
 length, snippet errors, ...), unplottable*.jsonl and done_sessions*.txt. Re-running skips sessions listed in
 done_sessions (--overwrite redoes them); for Slurm arrays use --shard i/N (every shard writes its own
@@ -64,7 +65,7 @@ import cv2
 import numpy as np
 import pyarrow.parquet as pq
 import shapely
-from pyproj import Transformer
+from pyproj import CRS, Transformer
 from scipy.interpolate import PchipInterpolator
 from shapely import wkt
 
@@ -84,12 +85,28 @@ TICKS_PER_S = 10  # path samples per second; one marker dot per second
 # --------------------------------------------------------------------------------------
 # Locating and loading a clip
 # --------------------------------------------------------------------------------------
+def rel_clip(clip_id: str, dataset_root: str) -> str:
+    """Dataset-relative clip path: real manifests hold absolute paths under the dataset root, synthetic ones relative paths."""
+    return clip_id.replace(dataset_root.rstrip("/") + "/", "", 1)
+
+
 def clip_files(clip_id: str, dataset_root: str):
     """-> (session_rel, time, zip/dir-relative inner path of result.npz, gps csv path)."""
-    rel = Path(clip_id).relative_to(dataset_root).parts  # [Country, (State,) date, session, time, FRONT_FOLDER, f.mp4]
+    rel = Path(rel_clip(clip_id, dataset_root)).parts  # [Country, (State,) date, session, time, FRONT_FOLDER, f.mp4]
     session_rel = "/".join(rel[:-3])
     time_dir, stem = rel[-3], Path(rel[-1]).stem
     return session_rel, time_dir, f"{time_dir}/FRONT_FOLDER/{stem}/result.npz", str(Path(clip_id).with_suffix(".csv"))
+
+
+def clip_utm_crs(npz, csv_path: str):
+    """UTM zone the clip's poses are in: from the GPS csv next to the video for real clips; synthetic clips have none and
+    record it in gps_fusion_json."""
+    if Path(csv_path).exists():
+        return load_gps_fixes(csv_path)["utm_crs"]
+    epsg = json.loads(str(npz["gps_fusion_json"])).get("utm_epsg") if "gps_fusion_json" in npz else None
+    if not epsg:
+        raise ValueError("no GPS csv and no utm_epsg in the result")
+    return CRS.from_epsg(int(epsg))
 
 
 def load_result(traj_root: str, session_rel: str, inner: str):
@@ -203,7 +220,7 @@ def process_clip(row, samples, a, files, texts):
         skipped["no_result"] += 1
         return records, skipped, unplottable
     try:
-        cp = ClipPath(npz, load_gps_fixes(csv_path)["utm_crs"])
+        cp = ClipPath(npz, clip_utm_crs(npz, csv_path))
     except Exception:                                            # no GPS csv / no real fixes / degenerate route
         skipped["no_gps_or_bad_result"] += 1
         return records, skipped, unplottable
@@ -333,7 +350,8 @@ def main():
     ap.add_argument("--osm-data", required=True, help="prepared map root (osm_bev.py prepare; needs _regions.json)")
     ap.add_argument("--out", required=True, help="output root (one zip per session plus index/unplottable/done files)")
     ap.add_argument("--path", choices=["map_matched", "predicted", "none"], default="predicted")
-    ap.add_argument("--manifest", default=f"{TRAJ_ROOT}/manifest.jsonl", help="trajectory manifest (pose_source per clip)")
+    ap.add_argument("--manifest", nargs="+", default=[f"{TRAJ_ROOT}/manifest.jsonl"],
+                    help="trajectory manifest(s) (pose_source per clip); the synthetic dataset has one per region")
     ap.add_argument("--samples", default=SAMPLES_PARQUET,
                     help="sample manifest: one row per 5 s training sample; the map is drawn at each row's start frame")
     ap.add_argument("--dataset-root", default=DATASET_ROOT)
@@ -364,11 +382,11 @@ def main():
     ap.add_argument("--overwrite", action="store_true", help="redo sessions that are already in done_sessions*.txt")
     a = ap.parse_args()
 
-    rows = [json.loads(l) for l in open(a.manifest)]
-    rows = [r for r in rows if r.get("pose_source") == "fused"]
+    rows = [json.loads(l) for m in a.manifest for l in open(m)]
+    rows = [r for r in rows if r.get("pose_source") in ("fused", "synthetic")]
     if a.countries:
-        keep = tuple(f"{a.dataset_root}/{c}/" for c in a.countries)
-        rows = [r for r in rows if r["clip_id"].startswith(keep)]
+        keep = tuple(f"{c}/" for c in a.countries)
+        rows = [r for r in rows if rel_clip(r["clip_id"], a.dataset_root).startswith(keep)]
     if a.max_map_match_error_m is not None:
         rows = [r for r in rows
                 if ((r.get("gps_fusion") or {}).get("map_match_error_mean_m") or 1e9) <= a.max_map_match_error_m]
@@ -377,10 +395,11 @@ def main():
     rows.sort(key=lambda r: hashlib.sha1(f"{a.seed}:{r['clip_id']}".encode()).hexdigest())
     if a.limit_clips:
         rows = rows[:a.limit_clips]
-    keep = {r["clip_id"].replace(a.dataset_root.rstrip("/") + "/", "", 1) for r in rows}
-    t = pq.read_table(a.samples, columns=["sample_id", "source_video_path", "sample_index", "start_frame", "start_s"])
+    keep = {rel_clip(r["clip_id"], a.dataset_root) for r in rows}
+    clip_col = "source_video_path" if "source_video_path" in pq.read_schema(a.samples).names else "source_clip_path"
+    t = pq.read_table(a.samples, columns=["sample_id", clip_col, "sample_index", "start_frame", "start_s"])
     by = collections.defaultdict(list)
-    for sid, vp, si, sf, ss in zip(*(t[c].to_pylist() for c in ("sample_id", "source_video_path", "sample_index",
+    for sid, vp, si, sf, ss in zip(*(t[c].to_pylist() for c in ("sample_id", clip_col, "sample_index",
                                                                "start_frame", "start_s"))):
         if vp in keep:
             by[vp].append(dict(sample_id=sid, sample_index=si, start_frame=sf, start_s=ss))
@@ -400,7 +419,7 @@ def main():
     # session jobs: all selected clips of one session together (one zip per session)
     by_session = collections.defaultdict(list)
     for r in rows:
-        key = r["clip_id"].replace(a.dataset_root.rstrip("/") + "/", "", 1)
+        key = rel_clip(r["clip_id"], a.dataset_root)
         smp = sorted(by.get(key, []), key=lambda x: x["sample_index"])
         if smp:
             by_session[clip_files(r["clip_id"], a.dataset_root)[0]].append((r, smp))
