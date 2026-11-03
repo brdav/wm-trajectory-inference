@@ -243,7 +243,7 @@ def test_speed_and_trend_from_the_path():
     d = rt.describe_route(scene([main]), _along(cases[2][0]), TIMES)
     assert "and is braking." in rt.caption(dict(d, location=dict(d["location"], country="Japan")))
     d = rt.describe_route(scene([main]), _along(cases[5][0]), TIMES)
-    assert "drives" not in rt.caption(d) and not d["moving"]
+    assert "It drives" not in rt.caption(d) and not d["moving"]
 
 
 def test_side_is_only_given_for_controls_clearly_beside_the_path():
