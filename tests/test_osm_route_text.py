@@ -67,7 +67,7 @@ def test_events_only_those_facing_travel_ahead_and_beside_the_path():
     cap = rt.caption(d)
     assert "The path is about 40 m long." in cap
     assert "At about 20 m: a stop sign (right)." in cap and "At about 30 m: a speed hump" in cap
-    assert "At about 60 m: traffic lights" in cap and " s:" not in cap                 # distances, no times
+    assert "At about 60 m: possibly traffic lights" in cap and " s:" not in cap                 # distances, no times
 
 
 def test_stop_sign_without_direction_is_flagged_and_needs_to_be_on_the_driven_road():
