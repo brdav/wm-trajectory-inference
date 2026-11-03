@@ -94,16 +94,17 @@ def _road_record(r, t0, t1):
                 speed_limit_source=r["src"] if speed else None)
 
 
-def _road_segments(matched, times):
+def _road_segments(matched, times, dists):
+    """Runs of path points on one road; each with its time span and the distance along the path from the start."""
     segs = []
-    for r, t in zip(matched, times):
-        t = round(float(t), 2)
+    for r, t, d in zip(matched, times, dists):
+        t, d = round(float(t), 2), round(float(d), 1)
         if r is None:
             continue
         if segs and segs[-1]["osm_id"] == int(r["osm_id"]) and segs[-1]["t_end_s"] >= t - 0.25:
-            segs[-1]["t_end_s"] = t
+            segs[-1]["t_end_s"], segs[-1]["dist_end_m"] = t, d
         else:
-            segs.append(_road_record(r, t, t))
+            segs.append(dict(_road_record(r, t, t), dist_start_m=d, dist_end_m=d))
     return segs
 
 
@@ -143,7 +144,7 @@ def describe_route(scene, lonlat, times):
     roads = scene["roads"]
 
     matched = _match_roads(roads, xy, dirs)
-    segs = _road_segments(matched, times - times[0])
+    segs = _road_segments(matched, times - times[0], cum)
 
     # path, extended straight ahead by LOOKAHEAD_M so controls just past its end are found
     ext = shapely.LineString(np.vstack([xy, xy[-1] + dirs[-1] * LOOKAHEAD_M])) if moving else None
@@ -239,6 +240,16 @@ def _road_phrase(s):
     return ", ".join(parts)
 
 
+def _approx_m(d):
+    """Distance along the path as a rounded phrase: 'at the start' below 3 m, else the nearest 5 m."""
+    return None if d < 3.0 else f"{max(5, int(5 * round(d / 5.0)))} m"
+
+
+def _where(d, lead):
+    m = _approx_m(d)
+    return "at the start" if m is None else f"{lead} {m}"
+
+
 def _event_phrase(e):
     if e["type"] == "crossing":
         name = CROSSING_NAMES.get(e["subtype"], "a pedestrian crossing")
@@ -248,9 +259,7 @@ def _event_phrase(e):
             name = f"a speed {e['subtype']}"
     if e["direction_known"] is False:
         name = "possibly " + name
-    if e["beyond_path"]:
-        return f"just beyond the end of the path (about {e['ahead_of_end_m']:.0f} m): {name}"
-    return f"at about {e['t_s']:.1f} s: {name}"
+    return f"{_where(e['dist_from_start_m'], 'at about')}: {name}"
 
 
 def caption(d):
@@ -263,15 +272,18 @@ def caption(d):
         out.append(("The car is on a " if d["moving"] else "The car is standing on a ") + _road_phrase(first) + ".")
         for s in d["roads"][1:]:
             if s["t_end_s"] - s["t_start_s"] >= 0.5 or s is d["roads"][-1]:
-                out.append(f"From about {s['t_start_s']:.1f} s it is on a {_road_phrase(s)}.")
+                out.append(f"{_where(s['dist_start_m'], 'After about')[0].upper()}{_where(s['dist_start_m'], 'After about')[1:]} "
+                           f"it is on a {_road_phrase(s)}.")
+    if d["moving"]:
+        out.append(f"The path is about {_approx_m(d['path_length_m'])} long.")
     if m["kind"] == "straight":
-        out.append("The path goes straight.")
+        out.append("It goes straight.")
     elif m["kind"] == "slight":
-        out.append(f"The path bears slightly {m['direction']}.")
+        out.append(f"It bears slightly {m['direction']}.")
     elif m["kind"] == "turn":
-        out.append(f"The path turns {m['direction']} (about {abs(m['turn_deg']):.0f} degrees).")
+        out.append(f"It turns {m['direction']} (about {abs(m['turn_deg']):.0f} degrees).")
     elif m["kind"] == "u_turn":
-        out.append(f"The path makes a U-turn to the {m['direction']}.")
+        out.append(f"It makes a U-turn to the {m['direction']}.")
     for e in d["events"]:
         phrase = _event_phrase(e)
         out.append(f"{phrase[0].upper()}{phrase[1:]} ({e['side']}).")

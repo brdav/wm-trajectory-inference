@@ -65,7 +65,9 @@ def test_events_only_those_facing_travel_ahead_and_beside_the_path():
     assert got[4]["beyond_path"] and got[4]["t_s"] is None and abs(got[4]["ahead_of_end_m"] - 20.0) < 1.0
     assert [e["osm_id"] for e in d["events"]] == [1, 7, 4]            # ordered along the path
     cap = rt.caption(d)
-    assert "stop sign" in cap and "speed hump" in cap and "Just beyond the end of the path (about 20 m)" in cap
+    assert "The path is about 40 m long." in cap
+    assert "At about 20 m: a stop sign (right)." in cap and "At about 30 m: a speed hump" in cap
+    assert "At about 60 m: traffic lights" in cap and " s:" not in cap                 # distances, no times
 
 
 def test_stop_sign_without_direction_is_flagged_and_needs_to_be_on_the_driven_road():
@@ -99,3 +101,11 @@ def test_turn_and_standing_still():
     still = rt.describe_route(scene([road([(-20, 0), (20, 0)])]), np.zeros((51, 2)), TIMES)
     assert not still["moving"] and still["events"] == [] and "standing" in rt.caption(still)
     assert "No mapped road" in rt.caption(rt.describe_route(scene([]), north(), TIMES))
+
+
+def test_road_change_is_described_by_distance_and_a_pass_at_the_start_is_at_the_start():
+    a, b = road([(0, -30), (0, 20)], osm_id=1, cls="residential"), road([(0, 20), (0, 100)], osm_id=2, cls="primary")
+    d = rt.describe_route(scene([a, b], [node("give_way", 0.5, 0.5, direction=1, osm_id=5)]), north(), TIMES)
+    assert [(s["osm_id"], s["dist_start_m"]) for s in d["roads"]][1][0] == 2
+    cap = rt.caption(d)
+    assert "After about 20 m it is on a primary road." in cap and "At the start: a give-way sign" in cap
