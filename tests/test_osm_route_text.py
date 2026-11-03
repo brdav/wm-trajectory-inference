@@ -66,7 +66,7 @@ def test_events_only_those_facing_travel_ahead_and_beside_the_path():
     assert got[4]["beyond_path"] and got[4]["t_s"] is None and abs(got[4]["ahead_of_end_m"] - 20.0) < 1.0
     assert [e["osm_id"] for e in d["events"]] == [1, 7, 4]            # ordered along the path
     cap = rt.caption(d)
-    assert "The path is about 40 m long." in cap
+    assert "It drives at about 20 mph, at a steady speed." in cap                    # 8 m/s in Nevada: signs read mph
     assert "At about 20 m: a stop sign (right)." in cap and "At about 30 m: a speed hump" in cap
     assert "At about 60 m: possibly traffic lights" in cap and " s:" not in cap                 # distances, no times
 
@@ -220,3 +220,39 @@ def test_junction_is_judged_by_the_approach_even_when_the_path_turns_at_it():
     xy = np.column_stack([np.where(th < 0.5, 0.0, (th - 0.5) * 80), np.where(th < 0.5, th * 40, 20.0)])
     d = rt.describe_route(scene([main, cross]), xy, TIMES)
     assert [e["type"] for e in d["events"] if e["type"] in JUNCTIONS] == ["intersection"]
+
+
+def _along(speed_of_t):
+    """Straight path north whose speed (m/s) at time t is speed_of_t(t)."""
+    v = np.array([speed_of_t(t) for t in TIMES])
+    return np.column_stack([np.zeros(51), np.concatenate([[0.0], np.cumsum(0.5 * (v[1:] + v[:-1]) * np.diff(TIMES))])])
+
+
+def test_speed_and_trend_from_the_path():
+    main = road([(0, -30), (0, 400)])
+    cases = [(lambda t: 10.0, "steady"), (lambda t: 5.0 + 2.0 * t, "accelerating"), (lambda t: 15.0 - 2.0 * t, "braking"),
+             (lambda t: 8.0 * max(0.0, 1.0 - t / 3.0), "stopping"), (lambda t: 8.0 * min(1.0, max(0.0, t - 1.0) / 2.0), "pulling_away"),
+             (lambda t: 0.0, "stationary")]
+    for fn, trend in cases:
+        d = rt.describe_route(scene([main]), _along(fn), TIMES)
+        assert d["motion"]["trend"] == trend, (trend, d["motion"])
+    d = rt.describe_route(scene([main]), _along(cases[0][0]), TIMES)
+    assert d["motion"]["mean_kmh"] == 36.0
+    ch = dict(d, location=dict(d["location"], country="Switzerland"))
+    assert "It drives at about 35 km/h, at a steady speed." in rt.caption(ch)
+    d = rt.describe_route(scene([main]), _along(cases[2][0]), TIMES)
+    assert "and is braking." in rt.caption(dict(d, location=dict(d["location"], country="Japan")))
+    d = rt.describe_route(scene([main]), _along(cases[5][0]), TIMES)
+    assert "drives" not in rt.caption(d) and not d["moving"]
+
+
+def test_side_is_only_given_for_controls_clearly_beside_the_path():
+    main = road([(0, -30), (0, 100)])
+    nodes = [node("signals", 0.8, 20, osm_id=1), node("signals", 6.0, 40, osm_id=2), node("crossing", 0, 60, sub="marked", osm_id=3),
+             node("stop", -4.0, 70, direction=1, osm_id=4), node("level_crossing", 0.2, 80, osm_id=5)]
+    d = rt.describe_route(scene([main], nodes), north(), TIMES)
+    side = {e["osm_id"]: e["side"] for e in d["events"] if e["type"] != "intersection"}
+    assert side == {1: None, 2: "right", 3: None, 4: "left", 5: None}
+    cap = rt.caption(d)
+    assert "At about 20 m: possibly traffic lights." in cap and "At about 40 m: possibly traffic lights (right)." in cap
+    assert "pedestrian crossing." in cap and "level crossing." in cap

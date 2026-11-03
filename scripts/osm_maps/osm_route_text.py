@@ -24,6 +24,10 @@ ROAD_MATCH_M = 8.0        # a path point is matched to roads within this distanc
 HYSTERESIS_M = 2.0        # keep the previous road unless another one scores better by more than this
 LOOKAHEAD_M = 40.0        # events up to this far beyond the end of the path are reported (about one sight distance)
 NO_LIMIT_KMH = 140.0      # osm_bev.parse_speed_kmh turns maxspeed=none (no limit, e.g. German Autobahn) into this value
+SIDE_MIN_LATERAL_M = 3.0         # a control closer to the path than this sits on the road: no left / right is reported
+ACROSS_ROAD = {"crossing", "level_crossing", "calming", "mini_roundabout", "intersection", "t_junction", "fork", "roundabout"}
+TREND_MPS = 1.0                  # speed change over the sample (and 10 % of the mean speed) that counts as accelerating / braking
+STOPPED_MPS = 1.0
 MIN_MOVE_M = 2.0          # shorter paths = standing still
 # largest lateral distance (m) from the path at which an event is reported
 LATERAL_M = dict(stop=12.0, give_way=12.0, signals=10.0, crossing=3.0, calming=3.5, level_crossing=3.5,
@@ -276,6 +280,30 @@ def _road_segments(matched, times, dists):
     return segs
 
 
+def _motion(cum, times):
+    """Speed over the sample from the path: mean, over the first and the last second, and its trend. Speeds in km/h."""
+    t = times - times[0]
+    T = float(t[-1])
+    if T < 2.0:
+        return dict(mean_kmh=None, start_kmh=None, end_kmh=None, trend=None)
+    v0 = float(np.interp(1.0, t, cum) - cum[0])
+    v1 = float(cum[-1] - np.interp(T - 1.0, t, cum))
+    mean = float(cum[-1] - cum[0]) / T
+    if mean < 0.3:
+        trend = "stationary"
+    elif v1 < STOPPED_MPS <= v0 - 1.0:
+        trend = "stopping"
+    elif v0 < STOPPED_MPS <= v1 - 1.0:
+        trend = "pulling_away"
+    elif v1 - v0 > max(TREND_MPS, 0.1 * mean):
+        trend = "accelerating"
+    elif v0 - v1 > max(TREND_MPS, 0.1 * mean):
+        trend = "braking"
+    else:
+        trend = "steady"
+    return dict(mean_kmh=round(mean * 3.6, 1), start_kmh=round(v0 * 3.6, 1), end_kmh=round(v1 * 3.6, 1), trend=trend)
+
+
 def _maneuver(xy, times, length):
     if length < MIN_MOVE_M:
         return dict(kind="stationary", turn_deg=None)
@@ -339,7 +367,8 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
             events.append(dict(
                 type=kind, subtype=sub or None, t_s=None if beyond else round(float(np.interp(s, cum, times - times[0])), 2),
                 dist_from_start_m=round(s, 1), beyond_path=beyond, ahead_of_end_m=round(s - length, 1) if beyond else None,
-                side=side or ("left" if tan[0] * v[1] - tan[1] * v[0] > 0 else "right"), lateral_m=round(lat, 1),
+                side=side or (None if kind in ACROSS_ROAD or lat < SIDE_MIN_LATERAL_M
+                              else "left" if tan[0] * v[1] - tan[1] * v[0] > 0 else "right"), lateral_m=round(lat, 1),
                 direction_known=direction_known, osm_id=node_id, **extra))
 
         for n in scene["nodes"]:
@@ -388,7 +417,8 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
     lon0, lat0 = (float(v) for v in np.asarray(lonlat, float)[0])
     return dict(version=VERSION, location=_location(scene.get("region"), lat0, lon0, places),
                 horizon_s=round(float(times[-1] - times[0]), 2), moving=moving,
-                path_length_m=round(length, 1), drive_side=scene["side"], maneuver=_maneuver(xy, times, length),
+                path_length_m=round(length, 1), drive_side=scene["side"], motion=_motion(cum, times),
+                maneuver=_maneuver(xy, times, length),
                 roads=segs, events=events)
 
 
@@ -434,7 +464,7 @@ def _road_phrase(s, country=None):
     return ", ".join(parts)
 
 
-NO_SIDE = {"intersection", "side_road", "t_junction", "fork", "roundabout"}   # on the path, or the side is in the phrase
+NO_SIDE = {"side_road"}                  # the side is in the phrase
 
 
 def _approx_m(d):
@@ -469,6 +499,20 @@ def _event_phrase(e):
     return f"{_where(e['dist_from_start_m'], 'at about')}: {name}"
 
 
+def _motion_phrase(m, country):
+    """'It drives at about 30 km/h and is braking.' from the stored motion record."""
+    if not m or m.get("mean_kmh") is None or m["trend"] == "stationary":
+        return None
+    unit_mph = country in MPH_COUNTRIES
+    v = m["mean_kmh"] / 1.609344 if unit_mph else m["mean_kmh"]
+    speed = f"about {max(5, 5 * round(v / 5))} {'mph' if unit_mph else 'km/h'}"
+    return {"steady": f"It drives at {speed}, at a steady speed.",
+            "accelerating": f"It drives at {speed} and is accelerating.",
+            "braking": f"It drives at {speed} and is braking.",
+            "stopping": f"It brakes to a stop (average speed {speed}).",
+            "pulling_away": f"It pulls away from standstill (average speed {speed})."}[m["trend"]]
+
+
 def _location_phrase(loc):
     """'Winterthur, Switzerland' / 'near Reno, Nevada, United States' / 'Japan'; None without a country."""
     if not loc or not loc.get("country"):
@@ -500,8 +544,9 @@ def caption(d):
                 shown = phrase
                 out.append(f"{_where(s['dist_start_m'], 'After about')[0].upper()}{_where(s['dist_start_m'], 'After about')[1:]} "
                            f"it is on a {_road_phrase(s, country)}.")
-    if d["moving"]:
-        out.append(f"The path is about {_approx_m(d['path_length_m'])} long.")
+    motion = _motion_phrase(d.get("motion"), country) if d["moving"] else None
+    if motion:
+        out.append(motion)
     if m["kind"] == "straight":
         out.append("It goes straight.")
     elif m["kind"] == "slight":
@@ -512,6 +557,6 @@ def caption(d):
         out.append(f"It makes a U-turn to the {m['direction']}.")
     for e in d["events"]:
         phrase = _event_phrase(e)
-        side = "" if e["type"] in NO_SIDE else f" ({e['side']})"      # a junction on the path has no side
+        side = f" ({e['side']})" if e["side"] and e["type"] not in NO_SIDE else ""   # only controls clearly beside the path
         out.append(f"{phrase[0].upper()}{phrase[1:]}{side}.")
     return " ".join(out)
