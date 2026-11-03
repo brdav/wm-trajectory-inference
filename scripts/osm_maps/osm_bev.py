@@ -1386,7 +1386,8 @@ class MapRenderer:
                ego_scale=None):
         """Render the ego-centred crop at (lat, lon) heading `heading_deg` (compass, clockwise from north).
         trajectory: dict(lonlat=(N, 2) array, ticks=[indices]) of the future ego path to draw on top.
-        Returns dict(image=RGB array, meta=...)."""
+        Returns dict(image=RGB array, meta=..., scene=...); `scene` is the classified, local-frame feature set the image was
+        drawn from (roads with inferred lanes / speeds, nodes, crossing ways), for osm_route_text.py."""
         import shapely
 
         countries, centre_region = self._regions_near(lat, lon, country)
@@ -1418,7 +1419,8 @@ class MapRenderer:
         return dict(image=cv.result(), meta=dict(
             lat=lat, lon=lon, heading_deg=heading_deg, heading_up=self.heading_up, country=country,
             countries_with_data=found, drive_side=side, meters_per_px=self.res, px=self.px,
-            half_extent_m=self.half, n_features=len(rows)))
+            half_extent_m=self.half, n_features=len(rows)),
+            scene=dict(roads=roads, nodes=nodes, crossings_way=crossings_way, to_local=to_local, side=side))
 
 
 # --------------------------------------------------------------------------------------

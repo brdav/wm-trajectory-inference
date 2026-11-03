@@ -26,13 +26,19 @@ check (e.g. a reversal) counts as unplottable too.
 
 Output: ONE ZIP PER SESSION, --out/<Country>/[<State>/]<date>/<session>.zip (the layout of the trajectories' packed
 sessions: ~45k files for the whole dataset instead of ~1.3M). A zip is stored (images are not recompressed) and holds
-<HH-MM-SS>_s<sample_index>.<png|webp> plus index.jsonl and unplottable.jsonl for that session; optional --save-mask
+<HH-MM-SS>_s<sample_index>.<png|webp> plus index.jsonl, unplottable.jsonl and text.jsonl for that session; optional --save-mask
 (path layer, *_path.png) and --save-map-only (view without the path, *_map.png). The image of a sample row is therefore
 entry <time>_s<sample_index>.<ext> of <session>.zip (both from source_video_path / sample_index).
 At the top of --out: index*.jsonl (one line per image: sample_id, start_frame, t0, lat/lon, heading, region, path
 length, snippet errors, ...), unplottable*.jsonl and done_sessions*.txt. Re-running skips sessions listed in
 done_sessions (--overwrite redoes them); for Slurm arrays use --shard i/N (every shard writes its own
 *.shard<i>of<N> files).
+
+Route text (scripts/osm_maps/osm_route_text.py; --no-text skips it): for every image also what a forward camera would see
+along the 5 s path (the road's class / one-way / lanes / speed limit, signs, lights, crossings and bumps facing the direction of
+travel, the manoeuvre). The structured record is entry text.jsonl of the session zip (one line per image, keyed by `name` =
+the image entry), the sentence made from it (`caption`) is also in the index. Lane counts / limits taken from a neighbouring
+road carry source "inferred".
 
 Map data must be prepared for the area (osm_bev.py prepare ...; _regions.json from osm_bev.py regions). Samples whose
 position has no prepared data are counted and skipped.
@@ -68,6 +74,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "scripts" / "osm_maps"))  # osm_bev
 
 import osm_bev as ob  # noqa: E402
+import osm_route_text as rt  # noqa: E402
 from vggt_slam.gps import load_gps_fixes  # noqa: E402
 from vggt_slam.paths import DATASET_ROOT, SAMPLE_MANIFEST as SAMPLES_PARQUET, TRAJ_ROOT  # noqa: E402
 
@@ -183,9 +190,9 @@ def _has_map_data(mr, lat, lon):
     return len(rows) > 0
 
 
-def process_clip(row, samples, a, files):
+def process_clip(row, samples, a, files, texts):
     """Renders every sample of one clip. -> (index records, skip Counter, unplottable records); encoded images are
-    appended to `files` as (zip entry name, bytes)."""
+    appended to `files` as (zip entry name, bytes), the route descriptions to `texts` (osm_route_text.describe_route)."""
     mr = _R["mr"]
     skipped, records, unplottable = collections.Counter(), [], []
     session_rel, time_dir, inner, csv_path = clip_files(row["clip_id"], a["dataset_root"])
@@ -248,8 +255,8 @@ def process_clip(row, samples, a, files):
         lon0, lat0 = cp.to_ll.transform(*path[0])
         length = float(np.hypot(*np.diff(path, axis=0).T).sum())
         traj = None
+        ll = np.column_stack(cp.to_ll.transform(path[:, 0], path[:, 1]))
         if option != "none" and length >= 2.0:                   # a standing car has no direction to draw
-            ll = np.column_stack(cp.to_ll.transform(path[:, 0], path[:, 1]))
             traj = dict(lonlat=ll, ticks=[k for k in range(TICKS_PER_S, len(path), TICKS_PER_S)])
         ego_scale = 1.0 if option == "none" else 0.5
         o = mr.render(lat0, lon0, heading, None, ego=True, trajectory=traj, ego_scale=ego_scale)
@@ -266,6 +273,9 @@ def process_clip(row, samples, a, files):
             if a["save_mask"]:
                 files.append((name + "_path.png", cv2.imencode(".png", ((img != base).any(axis=2) * 255).astype(np.uint8),
                                                               [cv2.IMWRITE_PNG_COMPRESSION, 9])[1].tobytes()))
+        route = rt.describe_route(o["scene"], ll, tau - t0) if a["text"] and option != "none" else None
+        if route is not None:
+            texts.append(dict(name=name + a["ext"], sample_id=smp["sample_id"], caption=rt.caption(route), **route))
         records.append(dict(
             image=f"{session_rel}.zip::{name}{a['ext']}", clip_id=row["clip_id"], sample_id=smp["sample_id"],
             sample_index=int(smp["sample_index"]), start_frame=int(smp["start_frame"]), t0_s=round(t0, 2), path=option,
@@ -276,7 +286,8 @@ def process_clip(row, samples, a, files):
             path_turn_deg=_turn_deg(path),
             map_match_error_mean_m=(row.get("gps_fusion") or {}).get("map_match_error_mean_m"),
             snippet_err_mean_m=None if err_mean is None else round(err_mean, 2),
-            snippet_err_max_m=None if err_max is None else round(err_max, 2)))
+            snippet_err_max_m=None if err_max is None else round(err_max, 2),
+            caption=None if route is None else texts[-1]["caption"]))
         n_made += 1
     return records, skipped, unplottable
 
@@ -293,9 +304,9 @@ def process_session(job):
     index.jsonl and unplottable.jsonl. Written to a .part file and renamed, so a killed job never leaves a half zip.
     Returns (session_rel, n images, skip Counter, index records, unplottable records)."""
     a, session_rel = job["args"], job["session"]
-    files, records, unplottable, skipped = [], [], [], collections.Counter()
+    files, texts, records, unplottable, skipped = [], [], [], [], collections.Counter()
     for row, samples in job["clips"]:
-        r, sk, u = process_clip(row, samples, a, files)
+        r, sk, u = process_clip(row, samples, a, files, texts)
         records += r
         unplottable += u
         skipped.update(sk)
@@ -308,6 +319,8 @@ def process_session(job):
                 zf.writestr(name, data)
             zf.writestr("index.jsonl", "".join(json.dumps(x) + "\n" for x in records))
             zf.writestr("unplottable.jsonl", "".join(json.dumps(x) + "\n" for x in unplottable))
+            if a["text"]:
+                zf.writestr("text.jsonl", "".join(json.dumps(x) + "\n" for x in texts))
         part.replace(zp)
     return session_rel, len(records), skipped, records, unplottable
 
@@ -336,6 +349,7 @@ def main():
     ap.add_argument("--max-per-clip", type=int, default=100, help="maximum number of images per clip")
     ap.add_argument("--res", type=float, default=0.5, help="map resolution in m/pixel")
     ap.add_argument("--workers", type=int, default=8, help="worker processes (each loads its own MapRenderer)")
+    ap.add_argument("--no-text", action="store_true", help="skip the route descriptions (text.jsonl in every zip, caption in the index)")
     ap.add_argument("--save-mask", action="store_true", help="also write the path layer as *_path.png (binary mask)")
     ap.add_argument("--save-map-only", action="store_true", help="also write the view without the path as *_map.png")
     ap.add_argument("--format", choices=["png", "webp"], default="png", help="lossless image format inside the zips")
@@ -372,7 +386,7 @@ def main():
     args = dict(path=a.path, out=a.out, dataset_root=a.dataset_root, traj_root=a.traj_root, horizon=a.horizon,
                 ext=".webp" if a.format == "webp" else ".png", png_level=a.png_level,
                 gate_mean=a.max_snippet_error_m, gate_max=a.max_snippet_max_error_m, max_per_clip=a.max_per_clip,
-                save_mask=a.save_mask, save_map_only=a.save_map_only)
+                save_mask=a.save_mask, save_map_only=a.save_map_only, text=not a.no_text)
     # session jobs: all selected clips of one session together (one zip per session)
     by_session = collections.defaultdict(list)
     for r in rows:
