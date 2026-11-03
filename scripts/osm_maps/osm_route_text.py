@@ -101,6 +101,18 @@ def _arm_vectors(g, centre):
     return out
 
 
+def _approach_direction(vectors, ext, s, centre):
+    """Direction of travel INTO a junction: opposite to the arm the path came along (the path itself may already be turning at
+    the centre). Falls back to the path tangent when the path starts at the junction or no arm lies on it."""
+    tangent = _tangent(ext, s)
+    if s < 3.0 * JUNCTION_CLUSTER_M:
+        return tangent
+    pre = ext.interpolate(s - 3.0 * JUNCTION_CLUSTER_M)
+    back = _unit(np.array([pre.x - centre.x, pre.y - centre.y]))
+    best = max(vectors, key=lambda v: float(np.dot(v, back)))
+    return -best if float(np.dot(best, back)) > 0.8 else tangent
+
+
 def _classify_junction(vectors, fwd):
     """Junction type seen from the direction of travel `fwd`, from the arms' directions:
     side_road (the road goes on, one road joins on a side), intersection (the road goes on, roads leave on both sides or twice
@@ -355,7 +367,8 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
                     int(r["osm_id"]))
         inter, rounds = _junctions(roads, roundabout_ids or set())
         for centre, vectors in inter:
-            kind, side = _classify_junction(vectors, _tangent(ext, float(ext.project(centre))))
+            s_c = float(ext.project(centre))
+            kind, side = _classify_junction(vectors, _approach_direction(vectors, ext, s_c, centre))
             if kind:
                 add(kind, "", centre, None, None, side=side, arms=len(vectors))
         for way_id, ring, exits in rounds:

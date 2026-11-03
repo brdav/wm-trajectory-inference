@@ -211,3 +211,12 @@ def test_consecutive_ways_with_the_same_description_are_mentioned_once():
     b = road([(0, 20), (0, 100)], osm_id=2, cls="primary", nl=2, speed=50.0, src="map")
     d = rt.describe_route(scene([a, b]), north(), TIMES)
     assert len(d["roads"]) == 2 and "After about" not in rt.caption(d)
+
+
+def test_junction_is_judged_by_the_approach_even_when_the_path_turns_at_it():
+    main = _way([(0, -30), (0, 20), (0, 100)], 1)
+    cross = _way([(-50, 20), (0, 20), (50, 20)], 2)
+    th = np.linspace(0, 1, 51)                                    # drives up the main road, then turns right through the junction
+    xy = np.column_stack([np.where(th < 0.5, 0.0, (th - 0.5) * 80), np.where(th < 0.5, th * 40, 20.0)])
+    d = rt.describe_route(scene([main, cross]), xy, TIMES)
+    assert [e["type"] for e in d["events"] if e["type"] in JUNCTIONS] == ["intersection"]
