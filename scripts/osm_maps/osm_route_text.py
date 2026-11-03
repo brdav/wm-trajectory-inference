@@ -90,7 +90,7 @@ def _road_record(r, t0, t1):
     no_limit = speed == NO_LIMIT_KMH
     return dict(t_start_s=t0, t_end_s=t1, osm_id=int(r["osm_id"]), road_class=r["cls"], one_way=bool(r["oneway"]),
                 tunnel=bool(r["tunnel"]), lanes=lanes, lanes_source=r["lsrc"] if lanes else None,
-                speed_limit_kmh=None if no_limit or not speed else int(round(speed)), no_speed_limit=no_limit,
+                speed_limit_kmh=None if no_limit or not speed else int(round(speed)), no_explicit_speed_limit=no_limit,
                 speed_limit_source=r["src"] if speed else None)
 
 
@@ -230,7 +230,7 @@ def _road_phrase(s):
     if s["lanes"]:
         parts.append(f"{'probably ' if s['lanes_source'] == 'neighbour' else ''}{s['lanes']} "
                      f"lane{'s' if s['lanes'] > 1 else ''}")
-    if s["no_speed_limit"]:
+    if s["no_explicit_speed_limit"]:
         parts.append("no explicit speed limit" + (" (also on the adjoining road)" if s["speed_limit_source"] == "inferred" else ""))
     elif s["speed_limit_kmh"]:
         parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}{s['speed_limit_kmh']} km/h limit")

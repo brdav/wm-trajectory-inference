@@ -39,11 +39,11 @@ def test_road_attributes_and_sources():
     assert "primary road, 2 lanes, likely 50 km/h limit" in cap and "goes straight" in cap
 
 
-def test_maxspeed_none_is_no_speed_limit():
+def test_maxspeed_none_is_no_explicit_speed_limit():
     d = rt.describe_route(scene([road([(0, -30), (0, 100)], cls="motorway", oneway=1, speed=140.0, src="map")]),
                           north(), TIMES)
     seg, = d["roads"]
-    assert seg["speed_limit_kmh"] is None and seg["no_speed_limit"] and seg["speed_limit_source"] == "map"
+    assert seg["speed_limit_kmh"] is None and seg["no_explicit_speed_limit"] and seg["speed_limit_source"] == "map"
     assert "no explicit speed limit" in rt.caption(d) and "140" not in rt.caption(d)
 
 
