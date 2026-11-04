@@ -17,9 +17,9 @@ def node(cls, x, y, direction=0, sub="", osm_id=100):
     return dict(g=shapely.Point(x, y), cls=cls, direction=direction, sub=sub, osm_id=osm_id)
 
 
-def scene(roads, nodes=(), crossings=()):
+def scene(roads, nodes=(), crossings=(), region="United States_Nevada"):
     return dict(roads=list(roads), nodes=list(nodes), crossings_way=list(crossings), to_local=lambda a: a, side="right",
-                region="United States_Nevada")
+                region=region)
 
 
 TIMES = np.linspace(0.0, 5.0, 51)
@@ -33,18 +33,19 @@ def test_road_attributes_and_sources():
     main = road([(0, -30), (0, 100)], cls="primary", nl=2, speed=50.0, src="inferred")
     d = rt.describe_route(scene([main]), north(), TIMES)
     seg, = d["roads"]
-    assert (seg["road_class"], seg["lanes"], seg["lanes_source"], seg["speed_limit_kmh"],
-            seg["speed_limit_source"]) == ("primary", 2, "map", 50, "inferred")
+    assert (seg["road_class"], seg["lanes"], seg["lanes_source"], seg["speed_limit"],
+            seg["speed_limit_source"]) == ("primary", 2, "map", 31, "inferred")   # 50 km/h stored as mph in Nevada
+    assert d["speed_unit"] == "mph"
     assert d["maneuver"]["kind"] == "straight" and d["moving"]
     cap = rt.caption(d)
-    assert "primary road, 2 lanes, likely 30 mph limit" in cap and "goes straight" in cap
+    assert "primary road, 2 lanes, likely 31 mph limit" in cap and "goes straight" in cap
 
 
 def test_maxspeed_none_is_no_explicit_speed_limit():
     d = rt.describe_route(scene([road([(0, -30), (0, 100)], cls="motorway", oneway=1, speed=140.0, src="map")]),
                           north(), TIMES)
     seg, = d["roads"]
-    assert seg["speed_limit_kmh"] is None and seg["no_explicit_speed_limit"] and seg["speed_limit_source"] == "map"
+    assert seg["speed_limit"] is None and seg["no_explicit_speed_limit"] and seg["speed_limit_source"] == "map"
     assert "no explicit speed limit" in rt.caption(d) and "140" not in rt.caption(d)
 
 
@@ -199,11 +200,13 @@ def test_roundabout_needs_the_tag_and_counts_its_exits():
     assert rt._event_phrase(ev[0]).endswith("a roundabout")
 
 
-def test_speed_limits_read_in_mph_where_signs_do():
-    main = road([(0, -30), (0, 100)], cls="primary", speed=112.65, src="map")           # OSM "70 mph", stored as km/h
-    d = rt.describe_route(scene([main]), north(), TIMES)
-    assert "113 km/h limit" in rt.caption(dict(d, location=dict(d["location"], country="Switzerland")))
-    assert "70 mph limit" in rt.caption(dict(d, location=dict(d["location"], country="United Kingdom")))
+def test_speed_unit_follows_the_signs_of_the_country():
+    main = road([(0, -30), (0, 100)], cls="primary", speed=112.65, src="map")           # OSM "70 mph", held as km/h by osm_bev
+    d = rt.describe_route(scene([main], region="United Kingdom"), north(), TIMES)
+    assert d["speed_unit"] == "mph" and d["roads"][0]["speed_limit"] == 70 and "70 mph limit" in rt.caption(d)
+    d = rt.describe_route(scene([main], region="Switzerland"), north(), TIMES)
+    assert d["speed_unit"] == "km/h" and d["roads"][0]["speed_limit"] == 113 and "113 km/h limit" in rt.caption(d)
+
 
 
 def test_consecutive_ways_with_the_same_description_are_mentioned_once():
@@ -237,11 +240,12 @@ def test_speed_and_trend_from_the_path():
         d = rt.describe_route(scene([main]), _along(fn), TIMES)
         assert d["motion"]["trend"] == trend, (trend, d["motion"])
     d = rt.describe_route(scene([main]), _along(cases[0][0]), TIMES)
-    assert d["motion"]["mean_kmh"] == 36.0
-    ch = dict(d, location=dict(d["location"], country="Switzerland"))
-    assert "It drives at about 35 km/h, at a steady speed." in rt.caption(ch)
+    assert d["motion"]["mean_speed"] == 22.4 and d["speed_unit"] == "mph"          # 10 m/s in Nevada
+    assert "It drives at about 20 mph, at a steady speed." in rt.caption(d)
+    ch = rt.describe_route(scene([main], region="Switzerland"), _along(cases[0][0]), TIMES)
+    assert ch["motion"]["mean_speed"] == 36.0 and "It drives at about 35 km/h, at a steady speed." in rt.caption(ch)
     d = rt.describe_route(scene([main]), _along(cases[2][0]), TIMES)
-    assert "and is braking." in rt.caption(dict(d, location=dict(d["location"], country="Japan")))
+    assert "and is braking." in rt.caption(d)
     d = rt.describe_route(scene([main]), _along(cases[5][0]), TIMES)
     assert "It drives" not in rt.caption(d) and not d["moving"]
 

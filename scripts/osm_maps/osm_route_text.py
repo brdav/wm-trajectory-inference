@@ -19,7 +19,9 @@ from shapely.strtree import STRtree
 
 from osm_bev import NON_VEHICLE, country_of
 
-VERSION = 1
+VERSION = 2               # 2: speeds in the unit of the country's signs (`speed_unit`)
+KMH_PER_MPH = 1.609344
+MPH_COUNTRIES = {"United Kingdom", "United States", "Puerto Rico"}   # signs read mph (OSM values are converted to km/h by osm_bev)
 ROAD_MATCH_M = 8.0        # a path point is matched to roads within this distance
 HYSTERESIS_M = 2.0        # keep the previous road unless another one scores better by more than this
 LOOKAHEAD_M = 40.0        # events up to this far beyond the end of the path are reported (about one sight distance)
@@ -256,17 +258,17 @@ def _match_roads(roads, xy, dirs):
     return out
 
 
-def _road_record(r, t0, t1):
+def _road_record(r, t0, t1, mph=False):
     lanes = int(r["nl"]) or None
     speed = float(r["speed"]) if r["speed"] > 0 else None
     no_limit = speed == NO_LIMIT_KMH
     return dict(t_start_s=t0, t_end_s=t1, osm_id=int(r["osm_id"]), road_class=r["cls"], one_way=bool(r["oneway"]),
                 tunnel=bool(r["tunnel"]), lanes=lanes, lanes_source=r["lsrc"] if lanes else None,
-                speed_limit_kmh=None if no_limit or not speed else int(round(speed)), no_explicit_speed_limit=no_limit,
+                speed_limit=None if no_limit or not speed else int(round(speed / KMH_PER_MPH if mph else speed)), no_explicit_speed_limit=no_limit,
                 speed_limit_source=r["src"] if speed else None)
 
 
-def _road_segments(matched, times, dists):
+def _road_segments(matched, times, dists, mph=False):
     """Runs of path points on one road; each with its time span and the distance along the path from the start."""
     segs = []
     for r, t, d in zip(matched, times, dists):
@@ -276,16 +278,16 @@ def _road_segments(matched, times, dists):
         if segs and segs[-1]["osm_id"] == int(r["osm_id"]) and segs[-1]["t_end_s"] >= t - 0.25:
             segs[-1]["t_end_s"], segs[-1]["dist_end_m"] = t, d
         else:
-            segs.append(dict(_road_record(r, t, t), dist_start_m=d, dist_end_m=d))
+            segs.append(dict(_road_record(r, t, t, mph), dist_start_m=d, dist_end_m=d))
     return segs
 
 
-def _motion(cum, times):
-    """Speed over the sample from the path: mean, over the first and the last second, and its trend. Speeds in km/h."""
+def _motion(cum, times, mph=False):
+    """Speed over the sample from the path: mean, over the first and the last second, and its trend. Speeds in mph or km/h."""
     t = times - times[0]
     T = float(t[-1])
     if T < 2.0:
-        return dict(mean_kmh=None, start_kmh=None, end_kmh=None, trend=None)
+        return dict(mean_speed=None, start_speed=None, end_speed=None, trend=None)
     v0 = float(np.interp(1.0, t, cum) - cum[0])
     v1 = float(cum[-1] - np.interp(T - 1.0, t, cum))
     mean = float(cum[-1] - cum[0]) / T
@@ -301,7 +303,8 @@ def _motion(cum, times):
         trend = "braking"
     else:
         trend = "steady"
-    return dict(mean_kmh=round(mean * 3.6, 1), start_kmh=round(v0 * 3.6, 1), end_kmh=round(v1 * 3.6, 1), trend=trend)
+    k = 3.6 / KMH_PER_MPH if mph else 3.6
+    return dict(mean_speed=round(mean * k, 1), start_speed=round(v0 * k, 1), end_speed=round(v1 * k, 1), trend=trend)
 
 
 def _maneuver(xy, times, length):
@@ -342,7 +345,10 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
     roads = scene["roads"]
 
     matched = _match_roads(roads, xy, dirs)
-    segs = _road_segments(matched, times - times[0], cum)
+    lon0, lat0 = (float(v) for v in np.asarray(lonlat, float)[0])
+    location = _location(scene.get("region"), lat0, lon0, places)
+    mph = location["country"] in MPH_COUNTRIES
+    segs = _road_segments(matched, times - times[0], cum, mph)
 
     # path, extended straight ahead by LOOKAHEAD_M so controls just past its end are found
     ext = shapely.LineString(np.vstack([xy, xy[-1] + dirs[-1] * LOOKAHEAD_M])) if moving else None
@@ -414,10 +420,9 @@ def describe_route(scene, lonlat, times, places=None, roundabout_ids=None):
                 kept.append(e)
         events = kept
 
-    lon0, lat0 = (float(v) for v in np.asarray(lonlat, float)[0])
-    return dict(version=VERSION, location=_location(scene.get("region"), lat0, lon0, places),
+    return dict(version=VERSION, location=location, speed_unit="mph" if mph else "km/h",
                 horizon_s=round(float(times[-1] - times[0]), 2), moving=moving,
-                path_length_m=round(length, 1), drive_side=scene["side"], motion=_motion(cum, times),
+                path_length_m=round(length, 1), drive_side=scene["side"], motion=_motion(cum, times, mph),
                 maneuver=_maneuver(xy, times, length),
                 roads=segs, events=events)
 
@@ -440,25 +445,16 @@ CROSSING_NAMES = {"signals": "a signalised pedestrian crossing", "marked": "a ma
                   "other": "a pedestrian crossing"}
 
 
-MPH_COUNTRIES = {"United Kingdom", "United States", "Puerto Rico"}   # signs read mph; OSM values were converted to km/h
-
-
-def _speed_phrase(kmh, country):
-    if country in MPH_COUNTRIES:
-        return f"{5 * round(kmh / 1.609344 / 5)} mph"
-    return f"{kmh} km/h"
-
-
-def _road_phrase(s, country=None):
+def _road_phrase(s, unit):
     parts = [("one-way " if s["one_way"] else "") + ROAD_NAMES.get(s["road_class"], "road")]
     if s["lanes"]:
         parts.append(f"{'probably ' if s['lanes_source'] == 'neighbour' else ''}{s['lanes']} "
                      f"lane{'s' if s['lanes'] > 1 else ''}")
     if s["no_explicit_speed_limit"]:
         parts.append("no explicit speed limit" + (" (also on the adjoining road)" if s["speed_limit_source"] == "inferred" else ""))
-    elif s["speed_limit_kmh"]:
+    elif s["speed_limit"]:
         parts.append(f"{'likely ' if s['speed_limit_source'] == 'inferred' else ''}"
-                     f"{_speed_phrase(s['speed_limit_kmh'], country)} limit")
+                     f"{s['speed_limit']} {unit} limit")
     if s["tunnel"]:
         parts.append("in a tunnel")
     return ", ".join(parts)
@@ -499,13 +495,12 @@ def _event_phrase(e):
     return f"{_where(e['dist_from_start_m'], 'at about')}: {name}"
 
 
-def _motion_phrase(m, country):
+def _motion_phrase(d):
     """'It drives at about 30 km/h and is braking.' from the stored motion record."""
-    if not m or m.get("mean_kmh") is None or m["trend"] == "stationary":
+    m = d.get("motion")
+    if not m or m.get("mean_speed") is None or m["trend"] == "stationary":
         return None
-    unit_mph = country in MPH_COUNTRIES
-    v = m["mean_kmh"] / 1.609344 if unit_mph else m["mean_kmh"]
-    speed = f"about {max(5, 5 * round(v / 5))} {'mph' if unit_mph else 'km/h'}"
+    speed = f"about {max(5, 5 * round(m['mean_speed'] / 5))} {d['speed_unit']}"
     return {"steady": f"It drives at {speed}, at a steady speed.",
             "accelerating": f"It drives at {speed} and is accelerating.",
             "braking": f"It drives at {speed} and is braking.",
@@ -526,7 +521,7 @@ def _location_phrase(loc):
 def caption(d):
     """One short paragraph from a describe_route dict."""
     m, out = d["maneuver"], []
-    country = (d.get("location") or {}).get("country")
+    unit = d["speed_unit"]
     loc = _location_phrase(d.get("location"))
     if loc:
         out.append(f"Location: {loc}.")
@@ -536,17 +531,17 @@ def caption(d):
         out.append("No mapped road near the path.")
     else:
         first = d["roads"][0]
-        out.append(("The ego vehicle is on a " if d["moving"] else "The ego vehicle is standing on a ") + _road_phrase(first, country) + ".")
-        shown = _road_phrase(first, country)
+        out.append(("The ego vehicle is on a " if d["moving"] else "The ego vehicle is standing on a ") + _road_phrase(first, unit) + ".")
+        shown = _road_phrase(first, unit)
         for s in d["roads"][1:]:
-            phrase = _road_phrase(s, country)
+            phrase = _road_phrase(s, unit)
             if phrase == shown:
                 continue                                  # another way with the same description: nothing new to say
             if s["t_end_s"] - s["t_start_s"] >= 0.5 or s is d["roads"][-1]:
                 shown = phrase
                 out.append(f"{_where(s['dist_start_m'], 'After about')[0].upper()}{_where(s['dist_start_m'], 'After about')[1:]} "
-                           f"it is on a {_road_phrase(s, country)}.")
-    motion = _motion_phrase(d.get("motion"), country) if d["moving"] else None
+                           f"it is on a {_road_phrase(s, unit)}.")
+    motion = _motion_phrase(d) if d["moving"] else None
     if motion:
         out.append(motion)
     if m["kind"] == "straight":
