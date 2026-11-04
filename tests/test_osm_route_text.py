@@ -269,3 +269,13 @@ def test_drive_side_is_stated_and_the_uk_drives_on_the_left():
     main = road([(0, -30), (0, 100)])
     d = rt.describe_route(dict(scene([main]), side="left"), north(), TIMES)
     assert d["drive_side"] == "left" and "Traffic drives on the left." in rt.caption(d)
+
+
+def test_caption_without_ego_motion():
+    main = road([(0, -30), (0, 400)])
+    d = rt.describe_route(scene([main]), _along(lambda t: 5.0 + 2.0 * t), TIMES)
+    assert "is accelerating" in rt.caption(d)
+    cap = rt.caption(d, ego_motion=False)
+    assert "It drives" not in cap and "accelerating" not in cap and "mph" not in cap and "goes straight" in cap
+    d = rt.describe_route(scene([main]), _along(lambda t: 0.0), TIMES)
+    assert "standing on" in rt.caption(d) and rt.caption(d, ego_motion=False).startswith("Location") and "standing" not in rt.caption(d, ego_motion=False)

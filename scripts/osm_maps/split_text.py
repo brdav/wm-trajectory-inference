@@ -19,6 +19,8 @@ import multiprocessing as mp
 import zipfile
 from pathlib import Path
 
+CAPTION_KEYS = ("caption", "caption_no_motion")   # = osm_route_text.CAPTION_KEYS
+
 
 def lines(zf, name):
     return [json.loads(x) for x in zf.read(name).decode().splitlines() if x]
@@ -54,7 +56,7 @@ def strip_zip(job):
                     continue
                 data = zf.read(info.filename)
                 if info.filename == "index.jsonl":
-                    data = "".join(json.dumps({k: v for k, v in r.items() if k != "caption"}) + "\n"
+                    data = "".join(json.dumps({k: v for k, v in r.items() if k not in CAPTION_KEYS}) + "\n"
                                    for r in lines(zf, "index.jsonl")).encode()
                 out.writestr(info.filename, data)
     part.replace(zp)
@@ -75,7 +77,7 @@ def strip_index(path):
         for line in f:
             if not line.strip():
                 continue
-            out.write(json.dumps({k: v for k, v in json.loads(line).items() if k != "caption"}) + "\n")
+            out.write(json.dumps({k: v for k, v in json.loads(line).items() if k not in CAPTION_KEYS}) + "\n")
             n += 1
     tmp.replace(path)
     return n

@@ -518,8 +518,12 @@ def _location_phrase(loc):
     return f"{'' if loc['within_place'] else 'near '}{loc['place']}, {tail}"
 
 
-def caption(d):
-    """One short paragraph from a describe_route dict."""
+CAPTION_KEYS = ("caption", "caption_no_motion")
+
+
+def caption(d, ego_motion=True):
+    """One short paragraph from a describe_route dict. ego_motion=False leaves out everything about how the ego car moves:
+    its speed, accelerating / braking, and whether it stands still."""
     m, out = d["maneuver"], []
     unit = d["speed_unit"]
     loc = _location_phrase(d.get("location"))
@@ -531,7 +535,7 @@ def caption(d):
         out.append("No mapped road near the path.")
     else:
         first = d["roads"][0]
-        out.append(("The ego vehicle is on a " if d["moving"] else "The ego vehicle is standing on a ") + _road_phrase(first, unit) + ".")
+        out.append(("The ego vehicle is on a " if d["moving"] or not ego_motion else "The ego vehicle is standing on a ") + _road_phrase(first, unit) + ".")
         shown = _road_phrase(first, unit)
         for s in d["roads"][1:]:
             phrase = _road_phrase(s, unit)
@@ -541,7 +545,7 @@ def caption(d):
                 shown = phrase
                 out.append(f"{_where(s['dist_start_m'], 'After about')[0].upper()}{_where(s['dist_start_m'], 'After about')[1:]} "
                            f"it is on a {_road_phrase(s, unit)}.")
-    motion = _motion_phrase(d) if d["moving"] else None
+    motion = _motion_phrase(d) if d["moving"] and ego_motion else None
     if motion:
         out.append(motion)
     if m["kind"] == "straight":

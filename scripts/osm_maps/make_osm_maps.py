@@ -40,7 +40,8 @@ city / town / village from extract_places.py) and what a forward camera would se
 one-way / lanes / speed limit, signs, lights, crossings and bumps facing the direction of travel, the manoeuvre). The text is kept
 APART from the images, in --text-out (default: the sibling of --out with maps_ replaced by text_, e.g. maps_predicted -> text_predicted):
 the same zip layout, each session zip holds text.jsonl (the structured record, one line per image, keyed by `name` = the image entry)
-and index.jsonl, and the top level has index*.jsonl with the sentence made from the record (`caption`). The image zips and index
+and index.jsonl, and the top level has index*.jsonl with the sentences made from the record (`caption`, and `caption_no_motion` without the ego's speed,
+acceleration / braking and standing still). The image zips and index
 carry no text. --text-only writes just the text (then --out is the text folder itself). Lane counts / limits taken from a
 neighbouring road carry source "inferred".
 
@@ -298,7 +299,7 @@ def process_clip(row, samples, a, files, texts):
                                                               [cv2.IMWRITE_PNG_COMPRESSION, 9])[1].tobytes()))
         route = rt.describe_route(o["scene"], ll, tau - t0, _R["places"], _R["roundabouts"]) if a["text"] and option != "none" else None
         if route is not None:
-            texts.append(dict(name=name + a["ext"], sample_id=smp["sample_id"], caption=rt.caption(route), **route))
+            texts.append(dict(name=name + a["ext"], sample_id=smp["sample_id"], caption=rt.caption(route), caption_no_motion=rt.caption(route, ego_motion=False), **route))
         records.append(dict(
             image=f"{session_rel}.zip::{name}{a['ext']}", clip_id=row["clip_id"], sample_id=smp["sample_id"],
             sample_index=int(smp["sample_index"]), start_frame=int(smp["start_frame"]), t0_s=round(t0, 2), path=option,
@@ -310,7 +311,8 @@ def process_clip(row, samples, a, files, texts):
             map_match_error_mean_m=(row.get("gps_fusion") or {}).get("map_match_error_mean_m"),
             snippet_err_mean_m=None if err_mean is None else round(err_mean, 2),
             snippet_err_max_m=None if err_max is None else round(err_max, 2),
-            caption=None if route is None else texts[-1]["caption"]))
+            caption=None if route is None else texts[-1]["caption"],
+            caption_no_motion=None if route is None else texts[-1]["caption_no_motion"]))
         n_made += 1
     return records, skipped, unplottable
 
@@ -346,7 +348,7 @@ def process_session(job):
     def jsonl(rows):
         return "".join(json.dumps(x) + "\n" for x in rows)
     if files or texts:
-        no_caption = [{k: v for k, v in r.items() if k != "caption"} for r in records]
+        no_caption = [{k: v for k, v in r.items() if k not in rt.CAPTION_KEYS} for r in records]
         if text_only:                                       # --out is the text folder
             write_zip(a["out"], [("index.jsonl", jsonl(records)), ("unplottable.jsonl", jsonl(unplottable)),
                                  ("text.jsonl", jsonl(texts))])
@@ -467,7 +469,7 @@ def main():
             for rec in recs:
                 if text_index is not None:
                     text_index.write(json.dumps(rec) + "\n")
-                    rec = {k: v for k, v in rec.items() if k != "caption"}
+                    rec = {k: v for k, v in rec.items() if k not in rt.CAPTION_KEYS}
                 index.write(json.dumps(rec) + "\n")
             donef.write(sess + "\n")                         # after the zip is in place: safe to resume from this file
             for f in (index, unplot, donef, text_index):
