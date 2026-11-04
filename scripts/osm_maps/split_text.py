@@ -8,6 +8,10 @@
 is only rewritten when its text.jsonl is identical to the one in the same zip of --text; it then loses text.jsonl and the caption
 in its index.jsonl. The top-level index*.jsonl lose the `caption` field. Sessions without text.jsonl are left alone, so the script
 can be run again after an interruption. Do not run it while a job writes to either folder.
+
+--superseded: the text in --maps came from an older version of osm_route_text.py than the one that wrote --text (the records then
+differ in schema or in details such as rounding). A zip is then stripped when both hold the same entries (`name`); the number of
+captions that differ is reported. The text in --text is the one that stays.
 """
 import argparse
 import json
@@ -22,18 +26,27 @@ def lines(zf, name):
 
 def strip_zip(job):
     """-> (relative zip, status): 'stripped' | 'would strip' | 'no text' | 'no text copy' | 'differs'."""
-    zp, tp, apply = job
+    zp, tp, apply, superseded = job
     rel = zp.relative_to(job_root[0]).as_posix()
     with zipfile.ZipFile(zp) as zf:
         if "text.jsonl" not in zf.namelist():
-            return rel, "no text"
+            return rel, "no text", 0
         if not tp.exists():
-            return rel, "no text copy"
+            return rel, "no text copy", 0
         with zipfile.ZipFile(tp) as tf:
-            if "text.jsonl" not in tf.namelist() or lines(zf, "text.jsonl") != lines(tf, "text.jsonl"):
-                return rel, "differs"
+            if "text.jsonl" not in tf.namelist():
+                return rel, "differs", 0
+            old, new = lines(zf, "text.jsonl"), lines(tf, "text.jsonl")
+            if superseded:
+                if [x["name"] for x in old] != [x["name"] for x in new]:
+                    return rel, "differs", 0
+                n_diff = sum(x["caption"] != y["caption"] for x, y in zip(old, new))
+            elif old != new:
+                return rel, "differs", 0
+            else:
+                n_diff = 0
         if not apply:
-            return rel, "would strip"
+            return rel, "would strip", n_diff
         part = zp.with_name(zp.name + ".part")
         with zipfile.ZipFile(part, "w", zipfile.ZIP_STORED) as out:
             for info in zf.infolist():
@@ -45,7 +58,7 @@ def strip_zip(job):
                                    for r in lines(zf, "index.jsonl")).encode()
                 out.writestr(info.filename, data)
     part.replace(zp)
-    return rel, "stripped"
+    return rel, "stripped", n_diff
 
 
 def init(root):
@@ -73,21 +86,24 @@ def main():
     ap.add_argument("--maps", required=True)
     ap.add_argument("--text", required=True)
     ap.add_argument("--apply", action="store_true", help="rewrite the files (default: only check)")
+    ap.add_argument("--superseded", action="store_true", help="the text in --maps is from older code: require the same entries, "
+                    "not identical text (see above)")
     ap.add_argument("--workers", type=int, default=32)
     a = ap.parse_args()
     maps, text = Path(a.maps), Path(a.text)
 
     zips = sorted(maps.rglob("*.zip"))
-    jobs = [(z, text / z.relative_to(maps), a.apply) for z in zips]
-    counts = {}
+    jobs = [(z, text / z.relative_to(maps), a.apply, a.superseded) for z in zips]
+    counts, caption_diff = {}, 0
     with mp.Pool(a.workers, initializer=init, initargs=(maps,)) as pool:
-        for i, (rel, status) in enumerate(pool.imap_unordered(strip_zip, jobs, chunksize=4), 1):
+        for i, (rel, status, n_diff) in enumerate(pool.imap_unordered(strip_zip, jobs, chunksize=4), 1):
             counts[status] = counts.get(status, 0) + 1
+            caption_diff += n_diff
             if status in ("differs", "no text copy"):
                 print(f"  {status}: {rel}", flush=True)
             if i % 500 == 0:
                 print(f"  {i}/{len(jobs)} {counts}", flush=True)
-    print(f"{len(zips)} zips: {counts}")
+    print(f"{len(zips)} zips: {counts}" + (f"; {caption_diff} captions differ from the text copy" if a.superseded else ""))
     blocked = counts.get("differs", 0) + counts.get("no text copy", 0)
     if blocked:
         print(f"{blocked} zips were NOT changed (their text is not in --text or differs): the index files are left as they are")
