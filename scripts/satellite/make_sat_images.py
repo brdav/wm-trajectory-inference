@@ -5,7 +5,8 @@ cut from the tile cache of fetch_tiles.py. One record per OSM map image (<osm ma
 lat/lon/heading, so image <i> of the OSM maps and of the aerial images show exactly the same ground.
 
 Output (to keep the file count down, ~1.1M images go into one stored zip per country folder and month, not one per session):
-  <out>/<folder>/<YYYY-MM>.zip        entries <date>/<session>/<time>_s<idx>.<ext>  (same stem as the OSM map entry),
+  <out>/<folder>/<YYYY-MM>.zip        entries <date>/<session>/<time>_s<idx>.<ext>  (same stem as the OSM map entry; maps without a
+                                      date folder: <folder>/all.zip, entries <session>/<time>_s<idx>.<ext>),
                                       index.jsonl (one record per image) and unavailable.jsonl (samples without an image)
   <out>/summary<shard>.jsonl          one line per finished zip (counts, reasons, sources used)
 After adding sources for a region, `--redo-regions R ...` re-renders only the zips that list unavailable samples of R (atomically replaced;
@@ -40,10 +41,13 @@ _state = {}
 
 
 def split_entry(image):
-    """'<folder>/<date>/<session>.zip::<time>_s0000.webp' -> (folder, 'YYYY-MM', '<date>/<session>/<time>_s0000')."""
+    """'<folder>/<date>/<session>.zip::<time>_s0000.webp' -> (folder, 'YYYY-MM', '<date>/<session>/<time>_s0000').
+    Maps without a date folder ('<folder>/<session>.zip::...', natix-jp-uk and its synthetic set) go into one bundle 'all' per folder."""
     zname, name = image.split("::")
     parts = zname[:-4].split("/")
-    k = next(i for i, p in enumerate(parts) if DATE.match(p))
+    k = next((i for i, p in enumerate(parts) if DATE.match(p)), None)
+    if k is None:
+        return "/".join(parts[:-1]), "all", parts[-1] + "/" + name.rsplit(".", 1)[0]
     return "/".join(parts[:k]), parts[k][:7], "/".join(parts[k:]) + "/" + name.rsplit(".", 1)[0]
 
 
