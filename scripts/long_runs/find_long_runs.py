@@ -12,8 +12,10 @@ duration is the real mp4 duration, read from the container (the manifest's resam
 shift every gap). Real gaps of one session are spread over about -0.4 .. +1.5 s, so a strict --max_gap leaves few runs
 (5+ min: 9 at 0.5 s, ~100 at 0.75 s, ~520 at 1.0 s for the natix + natix-jp-uk data of 2026-11).
 
-With --top_n N only the N best runs are kept: lowest worst seam (max_gap_s) first, longer run on a tie, at most one run per
-session (a session is one drive; two runs of it are not independent samples). Otherwise every run is written, longest first.
+With --top_n N only the N best runs are kept. Each run is first cut down to its best part: the sub-run of >= --min_minutes
+with the smallest worst seam (so a run with one bad seam gives its good side), the longest on a tie. Those are ranked by
+worst seam (max_gap_s), longer first, at most one per session (a session is one drive; two runs of it are not independent
+samples). With --top_n 0 every whole run is written, longest first.
 
 The mp4 durations are only read for chunks that already form a run of >= --min_minutes under a loose gap
 (--max_gap + --prefilter_slack, by manifest duration), which keeps it to ~10k files.
@@ -87,6 +89,23 @@ def split_runs(chunks, max_gap):
     return c
 
 
+def best_windows(c, min_minutes):
+    """Per run, the sub-run of >= min_minutes with the smallest worst seam (the longest one on a tie). A run that has one
+    bad seam in the middle or at an end gives its good part; a run too short anywhere is dropped."""
+    out = []
+    for _, run in c.groupby("run"):
+        for t in sorted(run.gap.abs().dropna().unique()):             # smallest worst seam first
+            cut = run.gap.isna() | (run.gap.abs() > t)
+            seg = cut.cumsum()
+            minutes = run.dur.groupby(seg).sum() / 60
+            if minutes.max() >= min_minutes:
+                w = run[seg == minutes.idxmax()].copy()
+                w.iloc[0, w.columns.get_loc("gap")] = float("nan")
+                out.append(w)
+                break
+    return pd.concat(out) if out else c.iloc[:0]
+
+
 def summarize(c, all_chunks):
     r = c.groupby("run").agg(dataset=("dataset", "first"), country=("country", "first"), session=("session", "first"),
                              n_chunks=("dur", "size"), minutes=("dur", lambda s: s.sum() / 60), start=("start", "min"),
@@ -143,6 +162,8 @@ def main():
     cand = cand.dropna(subset=["dur"])
 
     c = split_runs(cand, args.max_gap)
+    if args.top_n:
+        c = best_windows(c, args.min_minutes)
     r = summarize(c, allc)
     r = r[r.minutes >= args.min_minutes]
     if args.top_n:
