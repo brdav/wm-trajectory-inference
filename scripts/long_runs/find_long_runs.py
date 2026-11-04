@@ -12,16 +12,14 @@ duration is the real mp4 duration, read from the container (the manifest's resam
 shift every gap). Real gaps of one session are spread over about -0.4 .. +1.5 s, so a strict --max_gap leaves few runs
 (5+ min: 9 at 0.5 s, ~100 at 0.75 s, ~520 at 1.0 s for the natix + natix-jp-uk data of 2026-11).
 
-With --top_n N only the N best runs are kept. Each run is first cut down to its best part: the sub-run of >= --min_minutes
-with the smallest worst seam (so a run with one bad seam gives its good side), the longest on a tie. Those are ranked by
-worst seam (max_gap_s), longer first, at most one per session (a session is one drive; two runs of it are not independent
-samples). With --top_n 0 every whole run is written, longest first.
+With --top_n N (default 10) only the N longest runs are kept, at most one per session (a session is one drive; two runs of it
+are not independent samples). With --top_n 0 every run is written, longest first.
 
 The mp4 durations are only read for chunks that already form a run of >= --min_minutes under a loose gap
 (--max_gap + --prefilter_slack, by manifest duration), which keeps it to ~10k files.
 
 Usage (on the cluster; needs pandas, pyarrow, av):
-    python3 scripts/long_runs/find_long_runs.py --out_csv runs.csv --out_chunks_csv run_chunks.csv     # the 10 best, gap <= 0.75 s
+    python3 scripts/long_runs/find_long_runs.py --out_csv runs.csv --out_chunks_csv run_chunks.csv     # the 10 longest runs, gap <= 0.6 s
     python3 scripts/long_runs/find_long_runs.py --max_gap 1.0 --top_n 0 --pose_sources fused metric --min_minutes 10 ...  # all runs
 """
 import argparse
@@ -89,23 +87,6 @@ def split_runs(chunks, max_gap):
     return c
 
 
-def best_windows(c, min_minutes):
-    """Per run, the sub-run of >= min_minutes with the smallest worst seam (the longest one on a tie). A run that has one
-    bad seam in the middle or at an end gives its good part; a run too short anywhere is dropped."""
-    out = []
-    for _, run in c.groupby("run"):
-        for t in sorted(run.gap.abs().dropna().unique()):             # smallest worst seam first
-            cut = run.gap.isna() | (run.gap.abs() > t)
-            seg = cut.cumsum()
-            minutes = run.dur.groupby(seg).sum() / 60
-            if minutes.max() >= min_minutes:
-                w = run[seg == minutes.idxmax()].copy()
-                w.iloc[0, w.columns.get_loc("gap")] = float("nan")
-                out.append(w)
-                break
-    return pd.concat(out) if out else c.iloc[:0]
-
-
 def summarize(c, all_chunks):
     r = c.groupby("run").agg(dataset=("dataset", "first"), country=("country", "first"), session=("session", "first"),
                              n_chunks=("dur", "size"), minutes=("dur", lambda s: s.sum() / 60), start=("start", "min"),
@@ -133,8 +114,8 @@ def main():
     p.add_argument("--processed_root", default=PROCESSED)
     p.add_argument("--datasets", nargs="+", default=list(DATASETS), choices=list(DATASETS))
     p.add_argument("--pose_sources", nargs="+", default=["fused"], choices=["fused", "metric"])
-    p.add_argument("--max_gap", type=float, default=0.75, help="max |gap| between neighbouring chunks, seconds")
-    p.add_argument("--top_n", type=int, default=10, help="keep the N runs with the lowest max_gap_s, one per session (0: all runs)")
+    p.add_argument("--max_gap", type=float, default=0.6, help="max |gap| between neighbouring chunks, seconds")
+    p.add_argument("--top_n", type=int, default=10, help="keep the N longest runs, one per session (0: all runs)")
     p.add_argument("--min_minutes", type=float, default=5.0)
     p.add_argument("--max_tail_s", type=float, default=2.0,
                    help="poses must reach within this many seconds of the chunk's end (qc.slam_valid_until_s)")
@@ -162,14 +143,10 @@ def main():
     cand = cand.dropna(subset=["dur"])
 
     c = split_runs(cand, args.max_gap)
-    if args.top_n:
-        c = best_windows(c, args.min_minutes)
     r = summarize(c, allc)
-    r = r[r.minutes >= args.min_minutes]
+    r = r[r.minutes >= args.min_minutes].sort_values("minutes", ascending=False)
     if args.top_n:
-        r = r.sort_values(["max_gap_s", "minutes"], ascending=[True, False]).drop_duplicates("session").head(args.top_n)
-    else:
-        r = r.sort_values("minutes", ascending=False)
+        r = r.drop_duplicates("session").head(args.top_n)
     r.round({"minutes": 2, "max_gap_s": 3}).to_csv(args.out_csv)
     c[c.run.isin(r.index)][["run", "dataset", "country", "session", "start", "dur", "gap", "pose_source", "reason",
                             "valid_until", "source_video_path"]].to_csv(args.out_chunks_csv, index=False)
