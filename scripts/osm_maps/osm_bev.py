@@ -1148,13 +1148,27 @@ class MapRenderer:
         self.regions = Regions(self.root) if (self.root / "_regions.json").exists() else None
 
     # ---- data access -------------------------------------------------------------------
+    @staticmethod
+    def _read_tile(pq, tf, cell, tries=6):
+        """Tile files are ~100 MB; under many parallel readers the shared file system occasionally returns a truncated footer
+        ("Parquet magic bytes not found") for a file that is fine. Reading it again works."""
+        import time
+        import pyarrow as pa
+        for k in range(tries):
+            try:
+                return pq.read_table(str(tf), filters=[("cell", "=", cell)])
+            except (pa.ArrowInvalid, OSError):
+                if k == tries - 1:
+                    raise
+                time.sleep(2 * (k + 1))
+
     @lru_cache(maxsize=256)
     def _cell(self, country: str, cell: str):
         import pyarrow.parquet as pq
         ix, iy = (int(v) for v in cell.split("_"))
         tf = self.root / country / ("tile_%d_%d.parquet" % tile_of_cell(ix, iy))
         if tf.exists():                                              # current layout: row group per cell inside a tile file
-            t = pq.read_table(str(tf), filters=[("cell", "=", cell)])
+            t = self._read_tile(pq, tf, cell)
             return t if t.num_rows else None
         d = self.root / country / f"cell={cell}"                     # legacy layout: one directory per cell
         return pq.read_table(str(d)) if d.exists() else None
