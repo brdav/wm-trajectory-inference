@@ -16,7 +16,7 @@
 #   sbatch scripts/osm_maps/run_osm_maps.sbatch                    # 4 tasks; use --array=0-(N-1) and N_SHARDS=N together
 #   N_SHARDS=8 sbatch --array=0-7 scripts/osm_maps/run_osm_maps.sbatch
 #   COUNTRIES="Switzerland" LIMIT_CLIPS=200 sbatch ...    # small test first
-#   PATH_KIND=map_matched sbatch scripts/osm_maps/run_osm_maps.sbatch   # same samples with the map-matched path -> maps_map_matched/
+#   NO_TEXT=1 PATH_KIND=map_matched sbatch scripts/osm_maps/run_osm_maps.sbatch   # same samples with the map-matched path -> maps_map_matched/ (no text)
 #   The route text is written next to the images (OUT=.../maps_predicted -> .../text_predicted; override with TEXT_OUT).
 #   TEXT_ONLY=1 OUT=<dir>/text_predicted sbatch ...          # route text only, for a dataset whose images exist already
 #   For another dataset set DATASET_ROOT, TRAJ_ROOT, SAMPLE_MANIFEST, OSM_DATA and OUT (and sbatch --output).
@@ -40,6 +40,7 @@ EXTRA=()
 [ -n "${COUNTRIES:-}" ] && EXTRA+=(--countries $COUNTRIES)
 [ -n "${LIMIT_CLIPS:-}" ] && EXTRA+=(--limit-clips "$LIMIT_CLIPS")
 [ -n "${TEXT_OUT:-}" ] && EXTRA+=(--text-out "$TEXT_OUT")
+[ -n "${NO_TEXT:-}" ] && EXTRA+=(--no-text)           # no route text at all (e.g. PATH_KIND=map_matched)
 [ -n "${TEXT_ONLY:-}" ] && EXTRA+=(--text-only)     # only the route text, no images (OUT then needs its own folder, e.g. text_predicted)
 
 CMD=(python3 -u "$REPO_DIR/scripts/osm_maps/make_osm_maps.py" --osm-data "$OSM_DATA" --out "$OUT" --path "$PATH_KIND"
