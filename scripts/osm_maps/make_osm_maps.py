@@ -27,7 +27,7 @@ check (e.g. a reversal) counts as unplottable too.
 
 Output: ONE ZIP PER SESSION, --out/<Country>/[<State>/]<date>/<session>.zip (the layout of the trajectories' packed
 sessions: ~45k files for the whole dataset instead of ~1.3M). A zip is stored (images are not recompressed) and holds
-<HH-MM-SS>_s<sample_index>.<png|webp> plus index.jsonl, unplottable.jsonl and text.jsonl for that session; optional --save-mask
+<HH-MM-SS>_s<sample_index>.<png|webp> plus index.jsonl and unplottable.jsonl for that session; optional --save-mask
 (path layer, *_path.png) and --save-map-only (view without the path, *_map.png). The image of a sample row is therefore
 entry <time>_s<sample_index>.<ext> of <session>.zip (both from source_video_path, or source_clip_path in the synthetic manifest, and sample_index).
 At the top of --out: index*.jsonl (one line per image: sample_id, start_frame, t0, lat/lon, heading, region, path
@@ -37,9 +37,12 @@ done_sessions (--overwrite redoes them); for Slurm arrays use --shard i/N (every
 
 Route text (scripts/osm_maps/osm_route_text.py; --no-text skips it): for every image also the location (country, nearest
 city / town / village from extract_places.py) and what a forward camera would see along the 5 s path (the road's class /
-one-way / lanes / speed limit, signs, lights, crossings and bumps facing the direction of travel, the manoeuvre). The structured record is entry text.jsonl of the session zip (one line per image, keyed by `name` =
-the image entry), the sentence made from it (`caption`) is also in the index. Lane counts / limits taken from a neighbouring
-road carry source "inferred".
+one-way / lanes / speed limit, signs, lights, crossings and bumps facing the direction of travel, the manoeuvre). The text is kept
+APART from the images, in --text-out (default: the sibling of --out with maps_ replaced by text_, e.g. maps_predicted -> text_predicted):
+the same zip layout, each session zip holds text.jsonl (the structured record, one line per image, keyed by `name` = the image entry)
+and index.jsonl, and the top level has index*.jsonl with the sentence made from the record (`caption`). The image zips and index
+carry no text. --text-only writes just the text (then --out is the text folder itself). Lane counts / limits taken from a
+neighbouring road carry source "inferred".
 
 Map data must be prepared for the area (osm_bev.py prepare ...; _regions.json from osm_bev.py regions). Samples whose
 position has no prepared data are counted and skipped.
@@ -325,23 +328,32 @@ def process_session(job):
     Returns (session_rel, n images, skip Counter, index records, unplottable records)."""
     a, session_rel = job["args"], job["session"]
     files, texts, records, unplottable, skipped = [], [], [], [], collections.Counter()
+    text_only = a["text_only"]
     for row, samples in job["clips"]:
         r, sk, u = process_clip(row, samples, a, files, texts)
         records += r
         unplottable += u
         skipped.update(sk)
-    if files or texts:
-        zp = Path(a["out"]) / (session_rel + ".zip")
+    def write_zip(root, entries):
+        zp = Path(root) / (session_rel + ".zip")
         zp.parent.mkdir(parents=True, exist_ok=True)
         part = zp.with_name(zp.name + ".part")
         with zipfile.ZipFile(part, "w", zipfile.ZIP_STORED) as zf:
-            for name, data in files:
+            for name, data in entries:
                 zf.writestr(name, data)
-            zf.writestr("index.jsonl", "".join(json.dumps(x) + "\n" for x in records))
-            zf.writestr("unplottable.jsonl", "".join(json.dumps(x) + "\n" for x in unplottable))
-            if a["text"]:
-                zf.writestr("text.jsonl", "".join(json.dumps(x) + "\n" for x in texts))
         part.replace(zp)
+
+    def jsonl(rows):
+        return "".join(json.dumps(x) + "\n" for x in rows)
+    if files or texts:
+        no_caption = [{k: v for k, v in r.items() if k != "caption"} for r in records]
+        if text_only:                                       # --out is the text folder
+            write_zip(a["out"], [("index.jsonl", jsonl(records)), ("unplottable.jsonl", jsonl(unplottable)),
+                                 ("text.jsonl", jsonl(texts))])
+        else:
+            if a["text"]:                                   # text first: a session is done once its images are in place
+                write_zip(a["text_out"], [("index.jsonl", jsonl(records)), ("text.jsonl", jsonl(texts))])
+            write_zip(a["out"], files + [("index.jsonl", jsonl(no_caption)), ("unplottable.jsonl", jsonl(unplottable))])
     return session_rel, len(records), skipped, records, unplottable
 
 
@@ -376,7 +388,9 @@ def main():
                                           "(default: <osm-data>/_roundabout_ways.parquet if it exists)")
     ap.add_argument("--text-only", action="store_true", help="write only the route text (text.jsonl in every zip, caption in the "
                                                              "index), no images: for datasets whose maps already exist")
-    ap.add_argument("--no-text", action="store_true", help="skip the route descriptions (text.jsonl in every zip, caption in the index)")
+    ap.add_argument("--no-text", action="store_true", help="skip the route descriptions")
+    ap.add_argument("--text-out", help="where the route text goes (default: --out with maps_ replaced by text_, else <out>_text); "
+                                       "with --text-only it is --out")
     ap.add_argument("--save-mask", action="store_true", help="also write the path layer as *_path.png (binary mask)")
     ap.add_argument("--save-map-only", action="store_true", help="also write the view without the path as *_map.png")
     ap.add_argument("--format", choices=["png", "webp"], default="png", help="lossless image format inside the zips")
@@ -416,8 +430,13 @@ def main():
         return flag or (str(Path(a.osm_data) / name) if (Path(a.osm_data) / name).exists() else None)
     places, roundabouts = lookup(a.places, "_places.parquet"), lookup(a.roundabouts, "_roundabout_ways.parquet")
     print(f"route text: places {places or 'none (country only)'}; roundabouts {roundabouts or 'none (not recognised)'}", flush=True)
-    Path(a.out).mkdir(parents=True, exist_ok=True)
-    args = dict(path=a.path, out=a.out, dataset_root=a.dataset_root, traj_root=a.traj_root, horizon=a.horizon,
+    out = Path(a.out)
+    text_out = out if a.text_only else Path(a.text_out) if a.text_out else out.with_name(
+        out.name.replace("maps_", "text_", 1) if out.name.startswith("maps_") else out.name + "_text")
+    out.mkdir(parents=True, exist_ok=True)
+    if not a.no_text and not a.text_only:
+        text_out.mkdir(parents=True, exist_ok=True)
+    args = dict(text_out=str(text_out), path=a.path, out=a.out, dataset_root=a.dataset_root, traj_root=a.traj_root, horizon=a.horizon,
                 ext=".webp" if a.format == "webp" else ".png", png_level=a.png_level,
                 gate_mean=a.max_snippet_error_m, gate_max=a.max_snippet_max_error_m, max_per_clip=a.max_per_clip,
                 save_mask=a.save_mask, save_map_only=a.save_map_only, text=not a.no_text or a.text_only,
@@ -438,21 +457,28 @@ def main():
     print(f"shard {si}/{sn}: {len(sessions)} sessions, {len(done & set(sessions))} already done, {len(jobs)} to do", flush=True)
 
     skipped, n_img = collections.Counter(), 0
-    with open(Path(a.out) / f"index{tag}.jsonl", "a") as index, open(Path(a.out) / f"unplottable{tag}.jsonl", "a") as unplot, \
+    text_index = None if a.text_only or a.no_text else open(text_out / f"index{tag}.jsonl", "a")
+    with open(out / f"index{tag}.jsonl", "a") as index, open(Path(a.out) / f"unplottable{tag}.jsonl", "a") as unplot, \
             open(done_file, "a") as donef, mp.Pool(a.workers, initializer=_init, initargs=(a.osm_data, a.res, places, roundabouts)) as pool:
         for i, (sess, n, sk, recs, unp) in enumerate(pool.imap_unordered(process_session, jobs, chunksize=1), 1):
             skipped.update(sk)
             for u in unp:
                 unplot.write(json.dumps(u) + "\n")
             for rec in recs:
+                if text_index is not None:
+                    text_index.write(json.dumps(rec) + "\n")
+                    rec = {k: v for k, v in rec.items() if k != "caption"}
                 index.write(json.dumps(rec) + "\n")
             donef.write(sess + "\n")                         # after the zip is in place: safe to resume from this file
-            for f in (index, unplot, donef):
-                f.flush()
+            for f in (index, unplot, donef, text_index):
+                if f is not None:
+                    f.flush()
             n_img += n
             if i % 25 == 0 or i == len(jobs):
                 print(f"  sessions {i}/{len(jobs)}  images {n_img}  skipped {dict(skipped)}", flush=True)
-    print(f"done: {n_img} images in {a.out}; skip reasons: {dict(skipped)}")
+    if text_index is not None:
+        text_index.close()
+    print(f"done: {n_img} images in {a.out}" + ("" if a.no_text or a.text_only else f", route text in {text_out}") + f"; skip reasons: {dict(skipped)}")
 
 
 if __name__ == "__main__":
